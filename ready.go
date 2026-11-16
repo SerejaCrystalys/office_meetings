@@ -44,6 +44,7 @@ type uiState struct {
 	People     []uiPerson `json:"people"`
 	Accepted   int        `json:"accepted"`
 	Declined   int        `json:"declined"`
+	Waiting    int        `json:"waiting"` // получили сбор, но молчат
 }
 
 var (
@@ -88,8 +89,19 @@ func onCall(cfg Config, ev ntfyEvent) {
 		addResponse(st, r)
 	}
 	delete(pending, ev.ID)
+	// Сообщаем остальным, что сбор до нас дошёл: пока не нажмём кнопку,
+	// у всех в окне мы будем в списке «молчат».
+	var seen response
+	sendSeen := time.Now().Before(st.Deadline)
+	if sendSeen {
+		seen = response{Call: ev.ID, Client: clientID, Name: cfg.Name, Answer: ansSeen}
+		addResponse(st, seen)
+	}
 	callsMu.Unlock()
 
+	if sendSeen {
+		go func() { _ = sendResponse(cfg, seen) }() // не дошло — не страшно, ошибку не показываем
+	}
 	setLast("Последний: " + title + " в " + start.Format("15:04"))
 	showReady(cfg, ev.ID)
 }
@@ -103,8 +115,10 @@ func testCall(cfg Config) {
 		Start: now, Deadline: now.Add(time.Duration(cfg.ReadyTimeout) * time.Second),
 		Local: true, Responses: map[string]response{},
 	}
-	addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: "accept"})
-	addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: "decline"})
+	addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept})
+	addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline})
+	addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
+	addResponse(st, response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansSeen})
 	callsMu.Lock()
 	calls[id] = st
 	callsMu.Unlock()
@@ -112,10 +126,19 @@ func testCall(cfg Config) {
 }
 
 func addResponse(st *callState, r response) {
-	if _, ok := st.Responses[r.Client]; !ok {
+	old, ok := st.Responses[r.Client]
+	if !ok {
 		st.Order = append(st.Order, r.Client)
+	} else if r.Answer == ansSeen && old.Answer != ansSeen {
+		return // «получил» не перетирает уже нажатый ответ (если пришёл позже него)
 	}
 	st.Responses[r.Client] = r
+}
+
+// answered — человек уже нажал «Принять» или «Отклонить».
+func answered(st *callState, client string) bool {
+	r, ok := st.Responses[client]
+	return ok && r.Answer != ansSeen
 }
 
 func onResponse(r response) {
@@ -150,21 +173,25 @@ func snapshot(id string) uiState {
 	for _, c := range st.Order {
 		r := st.Responses[c]
 		me := c == clientID
-		if me {
+		if me && r.Answer != ansSeen {
 			s.Mine = r.Answer
 		}
 		s.People = append(s.People, uiPerson{Name: r.Name, Answer: r.Answer, Me: me})
-		if r.Answer == "accept" {
+		switch r.Answer {
+		case ansAccept:
 			s.Accepted++
-		} else {
+		case ansDecline:
 			s.Declined++
+		default:
+			s.Waiting++
 		}
 	}
-	// принявшие сверху, ты — первым в своей группе
+	// сверху принявшие, потом молчащие, внизу отказавшиеся; ты — первым в своей группе
+	rank := map[string]int{ansAccept: 0, ansSeen: 1, ansDecline: 2}
 	sort.SliceStable(s.People, func(i, j int) bool {
 		a, b := s.People[i], s.People[j]
-		if a.Answer != b.Answer {
-			return a.Answer == "accept"
+		if rank[a.Answer] != rank[b.Answer] {
+			return rank[a.Answer] < rank[b.Answer]
 		}
 		return a.Me && !b.Me
 	})
@@ -172,7 +199,7 @@ func snapshot(id string) uiState {
 }
 
 func answer(cfg Config, id, ans string) uiState {
-	if ans != "accept" && ans != "decline" {
+	if ans != ansAccept && ans != ansDecline {
 		return snapshot(id)
 	}
 	callsMu.Lock()
@@ -180,7 +207,7 @@ func answer(cfg Config, id, ans string) uiState {
 	var r response
 	send := false
 	if ok && time.Now().Before(st.Deadline) {
-		if _, already := st.Responses[clientID]; !already {
+		if !answered(st, clientID) {
 			r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ans}
 			addResponse(st, r)
 			send = !st.Local

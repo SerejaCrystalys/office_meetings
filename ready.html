@@ -35,7 +35,11 @@
   }
   li.me { outline: 1px solid rgba(143,211,106,.45); }
   .mark { font-size: 22px; font-weight: 700; width: 26px; text-align: center; }
-  .ok { color: #66d675; } .no { color: #e35a5a; }
+  .ok { color: #66d675; } .no { color: #e35a5a; } .wait { color: #d9b44a; } .gone { color: #7d877f; }
+  li.silent { background: rgba(255,255,255,.03); color: #b3bab2; }
+  li.grp { display: block; background: none; padding: 0 2px; margin: 12px 0 6px; border-radius: 0;
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #7d877f; }
+  .grp:first-child { margin-top: 0; }
   .empty { text-align: center; color: #6c766e; font-size: 14px; padding: 14px; }
 </style>
 </head>
@@ -48,29 +52,48 @@
     <button class="dec" id="d">✗ Отклонить</button>
   </div>
   <div class="you" id="you"></div>
-  <div class="sum"><span class="ok" id="ca"></span><span class="no" id="cd"></span></div>
+  <div class="sum"><span class="ok" id="ca"></span><span class="wait" id="cw"></span><span class="no" id="cd"></span></div>
   <ul id="list"></ul>
 <script>
-  let S = null, skew = 0;
+  let S = null, skew = 0, expired = null;
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+  // Группы списка: приняли → молчат (получили, но не нажали) → отказались.
+  // После таймера «молчат» превращаются в «не ответили».
+  function renderList() {
+    const groups = [
+      { answer: 'accept',  title: 'Приняли',                             mark: '✓', cls: 'ok' },
+      { answer: 'seen',    title: expired ? 'Не ответили' : 'Молчат',     mark: expired ? '—' : '⏳', cls: expired ? 'gone' : 'wait' },
+      { answer: 'decline', title: 'Отказались',                          mark: '✗', cls: 'no' },
+    ];
+    let html = '';
+    for (const g of groups) {
+      const ps = S.people.filter(p => p.answer === g.answer);
+      if (!ps.length) continue;
+      html += `<li class="grp">${g.title} · ${ps.length}</li>`;
+      html += ps.map(p => `<li class="${p.me ? 'me' : ''} ${g.answer === 'seen' ? 'silent' : ''}">` +
+        `<span>${esc(p.name)}${p.me ? ' (ты)' : ''}</span><span class="mark ${g.cls}">${g.mark}</span></li>`).join('');
+    }
+    $('list').innerHTML = html || '<div class="empty">Пока никто не ответил</div>';
+    $('cw').textContent = (expired ? '— Не ответили: ' : '⏳ Молчат: ') + S.waiting;
+  }
+
   function render(s) {
     S = s; skew = s.nowMs - Date.now();
+    expired = Date.now() + skew >= s.deadlineMs;
     $('t').textContent = s.title;
     $('m').textContent = s.message || '';
-    $('list').innerHTML = s.people.length
-      ? s.people.map(p => `<li class="${p.me ? 'me' : ''}"><span>${esc(p.name)}${p.me ? ' (ты)' : ''}</span>` +
-          `<span class="mark ${p.answer === 'accept' ? 'ok' : 'no'}">${p.answer === 'accept' ? '✓' : '✗'}</span></li>`).join('')
-      : '<div class="empty">Пока никто не ответил</div>';
     $('ca').textContent = '✓ Приняли: ' + s.accepted;
     $('cd').textContent = '✗ Отказались: ' + s.declined;
+    renderList();
     tick();
   }
 
   function tick() {
     if (!S) return;
     const now = Date.now() + skew, total = S.deadlineMs - S.startMs, left = Math.max(0, S.deadlineMs - now);
+    if ((left <= 0) !== expired) { expired = left <= 0; renderList(); }
     $('bar').style.width = (total > 0 ? left / total * 100 : 0) + '%';
     $('left').textContent = left > 0 ? 'Осталось ' + Math.ceil(left / 1000) + ' с' : 'Время вышло';
     const done = !!S.mine || left <= 0;

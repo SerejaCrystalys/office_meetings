@@ -27,8 +27,18 @@ type response struct {
 	Call   string `json:"call"`   // id сообщения-сбора в ntfy
 	Client string `json:"client"` // id копии программы (чтобы не путать тёзок)
 	Name   string `json:"name"`
-	Answer string `json:"answer"` // accept | decline
+	Answer string `json:"answer"` // accept | decline | seen
 }
+
+// Варианты ответа. seen — «сбор дошёл, окно показано», шлётся автоматически
+// при получении сбора; accept/decline — то, что человек нажал.
+const (
+	ansAccept  = "accept"
+	ansDecline = "decline"
+	ansSeen    = "seen"
+)
+
+func validAnswer(a string) bool { return a == ansAccept || a == ansDecline || a == ansSeen }
 
 func subscribe(cfg Config) {
 	client := newClient(cfg, 0) // поток бесконечный, общий таймаут не ставим
@@ -101,8 +111,8 @@ func streamOnce(cfg Config, client *http.Client, lastID *string, onConnected fun
 
 		if ev.Topic == cfg.RespTopic() {
 			var r response
-			if json.Unmarshal([]byte(ev.Message), &r) == nil && r.Call != "" &&
-				(r.Answer == "accept" || r.Answer == "decline") {
+			if json.Unmarshal([]byte(ev.Message), &r) == nil && r.Call != "" && r.Client != "" &&
+				validAnswer(r.Answer) {
 				onResponse(r)
 			}
 			continue
