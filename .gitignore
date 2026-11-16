@@ -1,6 +1,7 @@
 # секреты и сборки — в репозиторий не попадают
 topic.txt
 config.json
+firmware/**/secrets.h
 *.exe
 *.exe.new
 *.exe.old

@@ -1,13 +1,33 @@
 {
+  "name": "Серёга",
   "server": "https://ntfy.sh",
   "topic": "",
   "token": "",
   "proxy": "",
   "update_repo": "SerejaCrystalys/office_meetings",
+  "ready_timeout": 60,
   "activities": [
-    { "menu": "🚬 Позвать на курилку", "title": "Курилка", "message": "🚬 Сбор на курилку!" },
-    { "menu": "🍲 Позвать на обед",    "title": "Обед",    "message": "🍲 Сбор на обед!" },
-    { "menu": "☕ Позвать на кофе",     "title": "Кофе",    "message": "☕ Кто за кофе?", "priority": 3 },
-    { "menu": "📞 Созвон через 5 минут", "title": "Созвон", "message": "📞 Через 5 минут созвон, подключайтесь", "priority": 5 }
+    {
+      "menu": "🚬 Позвать на курилку",
+      "title": "Курилка",
+      "message": "🚬 Сбор на курилку!"
+    },
+    {
+      "menu": "🍲 Позвать на обед",
+      "title": "Обед",
+      "message": "🍲 Сбор на обед!"
+    },
+    {
+      "menu": "☕ Позвать на кофе",
+      "title": "Кофе",
+      "message": "☕ Кто за кофе?",
+      "priority": 3
+    },
+    {
+      "menu": "📞 Созвон через 5 минут",
+      "title": "Созвон",
+      "message": "📞 Через 5 минут созвон, подключайтесь",
+      "priority": 5
+    }
   ]
 }

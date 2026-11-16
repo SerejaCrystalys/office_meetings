@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column; user-select: none;
+    background: radial-gradient(circle at 50% -10%, #2c3d2f 0%, #121815 55%, #0b0e0c 100%);
+    color: #e8eae6; font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  .head { padding: 24px 24px 6px; text-align: center; }
+  .title { font-size: 30px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  .msg { margin-top: 6px; font-size: 16px; color: #c3c9c1; }
+  .timer { margin: 16px 24px 0; height: 6px; background: #26302b; border-radius: 3px; overflow: hidden; }
+  .timer > div { height: 100%; width: 100%; background: linear-gradient(90deg, #3fa34d, #8fd36a); transition: width .25s linear; }
+  .left { text-align: center; font-size: 13px; color: #94a096; margin-top: 6px; }
+  .btns { display: flex; gap: 12px; padding: 16px 24px 10px; }
+  button {
+    flex: 1; border: 0; border-radius: 6px; padding: 15px 0; cursor: pointer; color: #fff;
+    font-size: 17px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    box-shadow: 0 2px 0 rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.15);
+  }
+  button:hover:not(:disabled) { filter: brightness(1.12); }
+  button:disabled { opacity: .3; cursor: default; }
+  .acc { background: linear-gradient(#45ae53, #2b7a37); }
+  .dec { background: linear-gradient(#bf4040, #812727); }
+  .you { text-align: center; font-size: 15px; min-height: 22px; padding: 0 24px 6px; }
+  .sum { display: flex; justify-content: center; gap: 20px; font-size: 14px; padding-bottom: 10px; }
+  ul { list-style: none; margin: 0; padding: 0 24px 18px; overflow: auto; flex: 1; }
+  li {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; margin-bottom: 6px; background: rgba(255,255,255,.05); border-radius: 6px; font-size: 15px;
+  }
+  li.me { outline: 1px solid rgba(143,211,106,.45); }
+  .mark { font-size: 22px; font-weight: 700; width: 26px; text-align: center; }
+  .ok { color: #66d675; } .no { color: #e35a5a; }
+  .empty { text-align: center; color: #6c766e; font-size: 14px; padding: 14px; }
+</style>
+</head>
+<body>
+  <div class="head"><div class="title" id="t"></div><div class="msg" id="m"></div></div>
+  <div class="timer"><div id="bar"></div></div>
+  <div class="left" id="left"></div>
+  <div class="btns">
+    <button class="acc" id="a">✓ Принять</button>
+    <button class="dec" id="d">✗ Отклонить</button>
+  </div>
+  <div class="you" id="you"></div>
+  <div class="sum"><span class="ok" id="ca"></span><span class="no" id="cd"></span></div>
+  <ul id="list"></ul>
+<script>
+  let S = null, skew = 0;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function render(s) {
+    S = s; skew = s.nowMs - Date.now();
+    $('t').textContent = s.title;
+    $('m').textContent = s.message || '';
+    $('list').innerHTML = s.people.length
+      ? s.people.map(p => `<li class="${p.me ? 'me' : ''}"><span>${esc(p.name)}${p.me ? ' (ты)' : ''}</span>` +
+          `<span class="mark ${p.answer === 'accept' ? 'ok' : 'no'}">${p.answer === 'accept' ? '✓' : '✗'}</span></li>`).join('')
+      : '<div class="empty">Пока никто не ответил</div>';
+    $('ca').textContent = '✓ Приняли: ' + s.accepted;
+    $('cd').textContent = '✗ Отказались: ' + s.declined;
+    tick();
+  }
+
+  function tick() {
+    if (!S) return;
+    const now = Date.now() + skew, total = S.deadlineMs - S.startMs, left = Math.max(0, S.deadlineMs - now);
+    $('bar').style.width = (total > 0 ? left / total * 100 : 0) + '%';
+    $('left').textContent = left > 0 ? 'Осталось ' + Math.ceil(left / 1000) + ' с' : 'Время вышло';
+    const done = !!S.mine || left <= 0;
+    $('a').disabled = done; $('d').disabled = done;
+    $('you').innerHTML = S.mine === 'accept' ? '<span class="ok">Ты принял</span>'
+      : S.mine === 'decline' ? '<span class="no">Ты отказался</span>'
+      : (left <= 0 ? 'Ты не успел ответить' : '');
+  }
+
+  setInterval(tick, 250);
+  $('a').onclick = () => answer('accept').then(render);
+  $('d').onclick = () => answer('decline').then(render);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWindow(); });
+  getState().then(render);
+</script>
+</body>
+</html>
