@@ -21,6 +21,7 @@ type callState struct {
 	ID        string
 	Title     string
 	Message   string
+	From      string // кто позвал; "" — кнопка
 	Start     time.Time
 	Deadline  time.Time
 	Local     bool // проверочный, в сеть не уходит
@@ -31,12 +32,14 @@ type callState struct {
 type uiPerson struct {
 	Name   string `json:"name"`
 	Answer string `json:"answer"`
+	Reason string `json:"reason,omitempty"`
 	Me     bool   `json:"me"`
 }
 
 type uiState struct {
 	Title      string     `json:"title"`
 	Message    string     `json:"message"`
+	From       string     `json:"from"` // кто позвал; "" — кнопка
 	StartMs    int64      `json:"startMs"`
 	DeadlineMs int64      `json:"deadlineMs"`
 	NowMs      int64      `json:"nowMs"`
@@ -45,13 +48,17 @@ type uiState struct {
 	Accepted   int        `json:"accepted"`
 	Declined   int        `json:"declined"`
 	Waiting    int        `json:"waiting"` // получили сбор, но молчат
+	Reasons    []string   `json:"reasons"` // подсказки причины отказа
 }
 
 var (
 	callsMu  sync.Mutex
 	calls    = map[string]*callState{}
 	pending  = map[string][]response{} // ответы, пришедшие раньше самого сбора
+	myCalls  = map[string]time.Time{}  // сборы, которые позвали мы (id → когда)
 	clientID string
+
+	declineReasons = defaultDeclineReasons // из config.json, задаётся в main
 
 	winMu   sync.Mutex
 	curWin  webview2.WebView
@@ -69,6 +76,7 @@ func onCall(cfg Config, ev ntfyEvent) {
 		ID:        ev.ID,
 		Title:     title,
 		Message:   ev.Message,
+		From:      ev.initiator(),
 		Start:     start,
 		Deadline:  start.Add(time.Duration(cfg.ReadyTimeout) * time.Second),
 		Responses: map[string]response{},
@@ -78,6 +86,11 @@ func onCall(cfg Config, ev ntfyEvent) {
 	for id, c := range calls { // подчищаем старые
 		if time.Since(c.Start) > 15*time.Minute {
 			delete(calls, id)
+		}
+	}
+	for id, t := range myCalls {
+		if time.Since(t) > 15*time.Minute {
+			delete(myCalls, id)
 		}
 	}
 	if _, dup := calls[ev.ID]; dup {
@@ -90,10 +103,13 @@ func onCall(cfg Config, ev ntfyEvent) {
 	}
 	delete(pending, ev.ID)
 	// Сообщаем остальным, что сбор до нас дошёл: пока не нажмём кнопку,
-	// у всех в окне мы будем в списке «молчат».
+	// у всех в окне мы будем в списке «молчат». Свой сбор уже принят в startCall.
 	var seen response
-	sendSeen := time.Now().Before(st.Deadline)
-	if sendSeen {
+	_, mine := myCalls[ev.ID]
+	sendSeen := !mine && time.Now().Before(st.Deadline)
+	if mine {
+		addResponse(st, response{Call: ev.ID, Client: clientID, Name: cfg.Name, Answer: ansAccept})
+	} else if sendSeen {
 		seen = response{Call: ev.ID, Client: clientID, Name: cfg.Name, Answer: ansSeen}
 		addResponse(st, seen)
 	}
@@ -102,8 +118,67 @@ func onCall(cfg Config, ev ntfyEvent) {
 	if sendSeen {
 		go func() { _ = sendResponse(cfg, seen) }() // не дошло — не страшно, ошибку не показываем
 	}
-	setLast("Последний: " + title + " в " + start.Format("15:04"))
+	who := st.From
+	if who == "" {
+		who = "кнопка"
+	}
+	setLast("Последний: " + title + " в " + start.Format("15:04") + " — " + who)
 	showReady(cfg, ev.ID)
+}
+
+// startCall — позвать всех из трея. Инициатор сразу считается принявшим, как в Доте.
+func startCall(cfg Config, a Activity) error {
+	id, err := publishCall(cfg, a)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil // сбор ушёл, но id не знаем — автопринятие пропускаем
+	}
+	r := response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansAccept}
+	callsMu.Lock()
+	myCalls[id] = time.Now()
+	st, ok := calls[id] // эхо сбора могло прийти раньше ответа на POST
+	if ok {
+		addResponse(st, r)
+	}
+	callsMu.Unlock()
+	if ok {
+		refresh(id)
+	}
+	go func() { _ = sendResponse(cfg, r) }()
+	return nil
+}
+
+// publishCall отправляет сбор. Сеть может оборвать соединение уже после того, как сбор
+// дошёл до ntfy, поэтому вслепую не повторяем: ждём немного эхо из подписки, и только
+// если его нет — пробуем ещё раз.
+func publishCall(cfg Config, a Activity) (string, error) {
+	sent := time.Now()
+	id, err := publish(cfg, a)
+	if err == nil || !retryable(err) {
+		return id, err
+	}
+	for i := 0; i < 10; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if id := findMyCall(cfg, a, sent); id != "" {
+			return id, nil
+		}
+	}
+	return publish(cfg, a)
+}
+
+// findMyCall — пришёл ли из подписки наш сбор (тот же заголовок, текст, наше имя) после sent.
+func findMyCall(cfg Config, a Activity, sent time.Time) string {
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	for id, c := range calls {
+		if !c.Local && c.Title == a.Title && c.Message == a.Message && c.From == cleanName(cfg.Name) &&
+			!c.Start.Before(sent.Add(-2*time.Second)) {
+			return id
+		}
+	}
+	return ""
 }
 
 // Локальная проверка окна — никому не отправляется.
@@ -111,12 +186,12 @@ func testCall(cfg Config) {
 	id := "local-" + time.Now().Format("150405.000")
 	now := time.Now()
 	st := &callState{
-		ID: id, Title: "Проверка", Message: "Так будет выглядеть сбор",
+		ID: id, Title: "Проверка", Message: "Так будет выглядеть сбор", From: "Вася",
 		Start: now, Deadline: now.Add(time.Duration(cfg.ReadyTimeout) * time.Second),
 		Local: true, Responses: map[string]response{},
 	}
 	addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept})
-	addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline})
+	addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "На созвоне до 15:00"})
 	addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
 	addResponse(st, response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansSeen})
 	callsMu.Lock()
@@ -160,15 +235,17 @@ func snapshot(id string) uiState {
 	defer callsMu.Unlock()
 	st, ok := calls[id]
 	if !ok {
-		return uiState{Title: "Сбор", NowMs: time.Now().UnixMilli()}
+		return uiState{Title: "Сбор", NowMs: time.Now().UnixMilli(), People: []uiPerson{}, Reasons: declineReasons}
 	}
 	s := uiState{
 		Title:      st.Title,
 		Message:    st.Message,
+		From:       st.From,
 		StartMs:    st.Start.UnixMilli(),
 		DeadlineMs: st.Deadline.UnixMilli(),
 		NowMs:      time.Now().UnixMilli(),
 		People:     []uiPerson{},
+		Reasons:    declineReasons,
 	}
 	for _, c := range st.Order {
 		r := st.Responses[c]
@@ -176,7 +253,7 @@ func snapshot(id string) uiState {
 		if me && r.Answer != ansSeen {
 			s.Mine = r.Answer
 		}
-		s.People = append(s.People, uiPerson{Name: r.Name, Answer: r.Answer, Me: me})
+		s.People = append(s.People, uiPerson{Name: r.Name, Answer: r.Answer, Reason: r.Reason, Me: me})
 		switch r.Answer {
 		case ansAccept:
 			s.Accepted++
@@ -198,9 +275,14 @@ func snapshot(id string) uiState {
 	return s
 }
 
-func answer(cfg Config, id, ans string) uiState {
+// answer — человек нажал кнопку; reason учитывается только для отказа.
+func answer(cfg Config, id, ans, reason string) uiState {
 	if ans != ansAccept && ans != ansDecline {
 		return snapshot(id)
+	}
+	reason = cleanReason(reason)
+	if ans != ansDecline {
+		reason = ""
 	}
 	callsMu.Lock()
 	st, ok := calls[id]
@@ -208,7 +290,7 @@ func answer(cfg Config, id, ans string) uiState {
 	send := false
 	if ok && time.Now().Before(st.Deadline) {
 		if !answered(st, clientID) {
-			r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ans}
+			r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ans, Reason: reason}
 			addResponse(st, r)
 			send = !st.Local
 		}
@@ -218,11 +300,24 @@ func answer(cfg Config, id, ans string) uiState {
 	if send {
 		go func() {
 			if err := sendResponse(cfg, r); err != nil {
-				messageBox("Office Meetings", "Ответ не ушёл: "+err.Error(), mbOK|mbIconError)
+				revertAnswer(id, r)
+				refresh(id)
+				messageBox("Office Meetings", "Ответ не ушёл: "+err.Error()+"\n\nНажми «Принять» или «Отклонить» ещё раз.", mbOK|mbIconError)
 			}
 		}()
 	}
 	return snapshot(id)
+}
+
+// revertAnswer — ответ так и не ушёл: снова «молчим», чтобы кнопки в окне ожили.
+// Если ответ на самом деле дошёл (оборвалось уже после), его эхо из ntfy вернёт всё как было.
+func revertAnswer(id string, r response) {
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if st, ok := calls[id]; ok && st.Responses[r.Client] == r {
+		r.Answer = ansSeen
+		st.Responses[r.Client] = r
+	}
 }
 
 func refresh(id string) {
@@ -280,7 +375,7 @@ func runWindow(cfg Config, id string) {
 	w.SetSize(440, 580, webview2.HintFixed)
 
 	_ = w.Bind("getState", func() uiState { return snapshot(id) })
-	_ = w.Bind("answer", func(a string) uiState { return answer(cfg, id, a) })
+	_ = w.Bind("answer", func(a, reason string) uiState { return answer(cfg, id, a, reason) })
 	_ = w.Bind("closeWindow", func() { w.Dispatch(func() { w.Terminate() }) })
 	w.SetHtml(readyHTML)
 

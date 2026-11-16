@@ -117,6 +117,7 @@ func main() {
 		return
 	}
 	clientID = newClientID()
+	declineReasons = cfg.DeclineReasons
 
 	systray.Run(func() {
 		systray.SetIcon(iconOff)
@@ -134,7 +135,7 @@ func main() {
 
 		systray.AddSeparator()
 		send := func(a Activity) {
-			if err := publish(cfg, a); err != nil {
+			if err := startCall(cfg, a); err != nil {
 				messageBox("Office Meetings", "Не удалось отправить: "+err.Error(), mbOK|mbIconError)
 			}
 		}

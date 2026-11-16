@@ -13,19 +13,41 @@
   .head { padding: 24px 24px 6px; text-align: center; }
   .title { font-size: 30px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
   .msg { margin-top: 6px; font-size: 16px; color: #c3c9c1; }
+  .from { margin-top: 6px; font-size: 13px; color: #94a096; }
+  .from b { color: #e8eae6; font-weight: 600; }
   .timer { margin: 16px 24px 0; height: 6px; background: #26302b; border-radius: 3px; overflow: hidden; }
   .timer > div { height: 100%; width: 100%; background: linear-gradient(90deg, #3fa34d, #8fd36a); transition: width .25s linear; }
   .left { text-align: center; font-size: 13px; color: #94a096; margin-top: 6px; }
   .btns { display: flex; gap: 12px; padding: 16px 24px 10px; }
   button {
     flex: 1; border: 0; border-radius: 6px; padding: 15px 0; cursor: pointer; color: #fff;
-    font-size: 17px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    font-size: 17px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; font-family: inherit;
     box-shadow: 0 2px 0 rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.15);
   }
   button:hover:not(:disabled) { filter: brightness(1.12); }
   button:disabled { opacity: .3; cursor: default; }
   .acc { background: linear-gradient(#45ae53, #2b7a37); }
   .dec { background: linear-gradient(#bf4040, #812727); }
+
+  /* Панель причины отказа — появляется вместо кнопок */
+  .why { display: none; padding: 14px 24px 8px; }
+  .why.open { display: block; }
+  .why .lbl { font-size: 13px; color: #94a096; margin-bottom: 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .chip {
+    flex: none; padding: 6px 10px; font-size: 13px; font-weight: 400; letter-spacing: 0; text-transform: none;
+    background: rgba(255,255,255,.08); border-radius: 14px; box-shadow: none; color: #dfe3dd;
+  }
+  .chip.on { background: rgba(227,90,90,.35); color: #fff; }
+  input {
+    width: 100%; padding: 9px 11px; font: inherit; font-size: 14px; color: #e8eae6; user-select: text;
+    background: rgba(0,0,0,.35); border: 1px solid #3a463f; border-radius: 6px; outline: none;
+  }
+  input:focus { border-color: #bf4040; }
+  .why .row { display: flex; gap: 10px; margin-top: 10px; }
+  .why .row button { padding: 11px 0; font-size: 14px; }
+  .back { background: rgba(255,255,255,.1); flex: 0 0 34%; }
+
   .you { text-align: center; font-size: 15px; min-height: 22px; padding: 0 24px 6px; }
   .sum { display: flex; justify-content: center; gap: 20px; font-size: 14px; padding-bottom: 10px; }
   ul { list-style: none; margin: 0; padding: 0 24px 18px; overflow: auto; flex: 1; }
@@ -34,28 +56,40 @@
     padding: 10px 14px; margin-bottom: 6px; background: rgba(255,255,255,.05); border-radius: 6px; font-size: 15px;
   }
   li.me { outline: 1px solid rgba(143,211,106,.45); }
-  .mark { font-size: 22px; font-weight: 700; width: 26px; text-align: center; }
+  .who { min-width: 0; }
+  .reason { font-size: 12px; color: #a3aba2; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mark { font-size: 22px; font-weight: 700; width: 26px; text-align: center; flex: none; }
   .ok { color: #66d675; } .no { color: #e35a5a; } .wait { color: #d9b44a; } .gone { color: #7d877f; }
   li.silent { background: rgba(255,255,255,.03); color: #b3bab2; }
   li.grp { display: block; background: none; padding: 0 2px; margin: 12px 0 6px; border-radius: 0;
     font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #7d877f; }
-  .grp:first-child { margin-top: 0; }
+  li.grp:first-child { margin-top: 0; }
   .empty { text-align: center; color: #6c766e; font-size: 14px; padding: 14px; }
 </style>
 </head>
 <body>
-  <div class="head"><div class="title" id="t"></div><div class="msg" id="m"></div></div>
+  <div class="head"><div class="title" id="t"></div><div class="msg" id="m"></div><div class="from" id="f"></div></div>
   <div class="timer"><div id="bar"></div></div>
   <div class="left" id="left"></div>
-  <div class="btns">
+  <div class="btns" id="btns">
     <button class="acc" id="a">✓ Принять</button>
     <button class="dec" id="d">✗ Отклонить</button>
+  </div>
+  <div class="why" id="why">
+    <div class="lbl">Почему отказываешься? (можно не писать)</div>
+    <div class="chips" id="chips"></div>
+    <input id="reason" maxlength="80" placeholder="Своя причина…" autocomplete="off">
+    <div class="row">
+      <button class="back" id="back">Назад</button>
+      <button class="dec" id="send">✗ Отклонить</button>
+    </div>
   </div>
   <div class="you" id="you"></div>
   <div class="sum"><span class="ok" id="ca"></span><span class="wait" id="cw"></span><span class="no" id="cd"></span></div>
   <ul id="list"></ul>
 <script>
-  let S = null, skew = 0, expired = null;
+  let S = null, skew = 0, expired = null, chipsKey = '', closeAt = null;
+  const CLOSE_DELAY = 5000; // окно закрывается само через 5 с после конца таймера или когда все ответили
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -63,9 +97,9 @@
   // После таймера «молчат» превращаются в «не ответили».
   function renderList() {
     const groups = [
-      { answer: 'accept',  title: 'Приняли',                             mark: '✓', cls: 'ok' },
-      { answer: 'seen',    title: expired ? 'Не ответили' : 'Молчат',     mark: expired ? '—' : '⏳', cls: expired ? 'gone' : 'wait' },
-      { answer: 'decline', title: 'Отказались',                          mark: '✗', cls: 'no' },
+      { answer: 'accept',  title: 'Приняли',                         mark: '✓', cls: 'ok' },
+      { answer: 'seen',    title: expired ? 'Не ответили' : 'Молчат', mark: expired ? '—' : '⏳', cls: expired ? 'gone' : 'wait' },
+      { answer: 'decline', title: 'Отказались',                      mark: '✗', cls: 'no' },
     ];
     let html = '';
     for (const g of groups) {
@@ -73,10 +107,35 @@
       if (!ps.length) continue;
       html += `<li class="grp">${g.title} · ${ps.length}</li>`;
       html += ps.map(p => `<li class="${p.me ? 'me' : ''} ${g.answer === 'seen' ? 'silent' : ''}">` +
-        `<span>${esc(p.name)}${p.me ? ' (ты)' : ''}</span><span class="mark ${g.cls}">${g.mark}</span></li>`).join('');
+        `<div class="who"><div>${esc(p.name)}${p.me ? ' (ты)' : ''}</div>` +
+        (p.reason ? `<div class="reason" title="${esc(p.reason)}">${esc(p.reason)}</div>` : '') +
+        `</div><span class="mark ${g.cls}">${g.mark}</span></li>`).join('');
     }
     $('list').innerHTML = html || '<div class="empty">Пока никто не ответил</div>';
     $('cw').textContent = (expired ? '— Не ответили: ' : '⏳ Молчат: ') + S.waiting;
+  }
+
+  // Подсказки причины — кнопки; клик подставляет текст в поле (повторный клик — очищает).
+  function renderChips() {
+    const rs = S.reasons || [], key = rs.join('\n');
+    if (key === chipsKey) return;
+    chipsKey = key;
+    $('chips').innerHTML = rs.map((r, i) => `<button class="chip" data-i="${i}">${esc(r)}</button>`).join('');
+    $('chips').querySelectorAll('.chip').forEach(b => b.onclick = () => {
+      const r = rs[+b.dataset.i];
+      $('reason').value = $('reason').value === r ? '' : r;
+      syncChips(); $('reason').focus();
+    });
+  }
+  function syncChips() {
+    const v = $('reason').value.trim();
+    $('chips').querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b.textContent === v));
+  }
+
+  function openWhy(on) {
+    $('why').classList.toggle('open', on);
+    $('btns').style.display = on ? 'none' : '';
+    if (on) { $('reason').value = ''; syncChips(); $('reason').focus(); }
   }
 
   function render(s) {
@@ -84,8 +143,10 @@
     expired = Date.now() + skew >= s.deadlineMs;
     $('t').textContent = s.title;
     $('m').textContent = s.message || '';
+    $('f').innerHTML = s.from ? 'Зовёт: <b>' + esc(s.from) + '</b>' : 'Позвала кнопка';
     $('ca').textContent = '✓ Приняли: ' + s.accepted;
     $('cd').textContent = '✗ Отказались: ' + s.declined;
+    renderChips();
     renderList();
     tick();
   }
@@ -95,18 +156,41 @@
     const now = Date.now() + skew, total = S.deadlineMs - S.startMs, left = Math.max(0, S.deadlineMs - now);
     if ((left <= 0) !== expired) { expired = left <= 0; renderList(); }
     $('bar').style.width = (total > 0 ? left / total * 100 : 0) + '%';
-    $('left').textContent = left > 0 ? 'Осталось ' + Math.ceil(left / 1000) + ' с' : 'Время вышло';
+
+    // Автозакрытие: таймер вышел, или ты ответил и молчащих не осталось. Если кто-то
+    // новый появится в «молчат» до закрытия — отсчёт сбрасывается.
+    const allAnswered = !!S.mine && S.waiting === 0;
+    if (left <= 0 || allAnswered) { if (closeAt === null) closeAt = now + CLOSE_DELAY; }
+    else closeAt = null;
+    if (closeAt !== null && now >= closeAt) { closeAt = Infinity; closeWindow(); return; }
+    const closing = closeAt !== null ? ' · закроется через ' + Math.max(1, Math.ceil((closeAt - now) / 1000)) + ' с' : '';
+    $('left').textContent = (left > 0 ? (allAnswered ? 'Все ответили' : 'Осталось ' + Math.ceil(left / 1000) + ' с')
+      : 'Время вышло') + closing;
     const done = !!S.mine || left <= 0;
-    $('a').disabled = done; $('d').disabled = done;
+    $('a').disabled = done; $('d').disabled = done; $('send').disabled = done;
+    if (done && $('why').classList.contains('open')) openWhy(false);
     $('you').innerHTML = S.mine === 'accept' ? '<span class="ok">Ты принял</span>'
       : S.mine === 'decline' ? '<span class="no">Ты отказался</span>'
       : (left <= 0 ? 'Ты не успел ответить' : '');
   }
 
+  function sendDecline() {
+    const reason = $('reason').value.trim();
+    openWhy(false);
+    answer('decline', reason).then(render);
+  }
+
   setInterval(tick, 250);
-  $('a').onclick = () => answer('accept').then(render);
-  $('d').onclick = () => answer('decline').then(render);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWindow(); });
+  $('a').onclick = () => answer('accept', '').then(render);
+  $('d').onclick = () => openWhy(true);
+  $('back').onclick = () => openWhy(false);
+  $('send').onclick = sendDecline;
+  $('reason').addEventListener('input', syncChips);
+  $('reason').addEventListener('keydown', e => { if (e.key === 'Enter') sendDecline(); });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if ($('why').classList.contains('open')) openWhy(false); else closeWindow();
+  });
   getState().then(render);
 </script>
 </body>

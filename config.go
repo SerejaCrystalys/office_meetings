@@ -26,6 +26,11 @@ var defaultActivities = []Activity{
 	{Menu: "🍲 Позвать на обед", Title: "Обед", Message: "🍲 Сбор на обед!"},
 }
 
+// Быстрые варианты причины отказа в окне сбора (свою можно вписать руками).
+var defaultDeclineReasons = []string{"Занят", "На созвоне", "Подойду позже", "Уже был", "Не в офисе"}
+
+const maxDeclineReasons = 8
+
 type Config struct {
 	Name         string     `json:"name"` // как тебя видят остальные в окне сбора
 	Server       string     `json:"server"`
@@ -35,6 +40,8 @@ type Config struct {
 	UpdateRepo   string     `json:"update_repo"`
 	ReadyTimeout int        `json:"ready_timeout"` // секунд на ответ «принять/отклонить»
 	Activities   []Activity `json:"activities"`
+	// Кнопки-подсказки причины отказа. Нет ключа — стандартный список, [] — без подсказок.
+	DeclineReasons []string `json:"decline_reasons"`
 }
 
 // ntfy принимает имена топиков только из [-_A-Za-z0-9], длиной 1–64.
@@ -71,8 +78,9 @@ func defaultName() string {
 	return "Аноним"
 }
 
-func loadConfig() (Config, error) {
-	path := configPath()
+func loadConfig() (Config, error) { return loadConfigFrom(configPath()) }
+
+func loadConfigFrom(path string) (Config, error) {
 	cfg := Config{
 		Name:         defaultName(),
 		Server:       defaultServer,
@@ -80,6 +88,8 @@ func loadConfig() (Config, error) {
 		UpdateRepo:   defaultUpdateRepo,
 		ReadyTimeout: 60,
 		Activities:   defaultActivities,
+
+		DeclineReasons: defaultDeclineReasons,
 	}
 
 	data, err := os.ReadFile(path)
@@ -93,6 +103,7 @@ func loadConfig() (Config, error) {
 	}
 
 	cfg.Activities = nil
+	cfg.DeclineReasons = nil
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("ошибка в config.json: %w", err)
 	}
@@ -152,6 +163,17 @@ func loadConfig() (Config, error) {
 		acts = defaultActivities
 	}
 	cfg.Activities = acts
+
+	reasons := []string{}
+	for _, s := range cfg.DeclineReasons {
+		if s = cleanReason(s); s != "" && len(reasons) < maxDeclineReasons {
+			reasons = append(reasons, s)
+		}
+	}
+	if !strings.Contains(string(data), `"decline_reasons"`) {
+		reasons = defaultDeclineReasons
+	}
+	cfg.DeclineReasons = reasons
 	return cfg, nil
 }
 
