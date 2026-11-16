@@ -85,11 +85,10 @@ func checkUpdates(cfg Config) {
 	}
 
 	var url, digest string
-	for _, name := range []string{"OfficeMeetings.exe", "KnopkaSbor.exe"} {
-		for _, a := range rel.Assets {
-			if url == "" && strings.EqualFold(a.Name, name) {
-				url, digest = a.URL, a.Digest
-			}
+	for _, a := range rel.Assets {
+		if strings.EqualFold(a.Name, "OfficeMeetings.exe") {
+			url, digest = a.URL, a.Digest
+			break
 		}
 	}
 	if url == "" {

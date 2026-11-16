@@ -165,23 +165,24 @@
 
 ```powershell
 # Windows
-powershell -ExecutionPolicy Bypass -File .\release.ps1 1.3.0
+powershell -ExecutionPolicy Bypass -File .\release.ps1 1.3.1
 ```
 ```bash
 # macOS / Linux
-./release.sh 1.3.0
+./release.sh 1.3.1
 ```
 
-Скрипт соберёт `OfficeMeetings.exe` с этим номером и создаст релиз `v1.3.0`.
+Скрипт соберёт `OfficeMeetings.exe` с этим номером и создаст релиз `v1.3.1`
+с единственным файлом `OfficeMeetings.exe`.
 Номер версии каждый раз должен быть больше прошлого.
-Для совместимости с версиями до 1.3.0 к релизу прикладывается копия под старым
-именем `KnopkaSbor.exe` — их можно убрать, когда все обновятся.
+Версии до 1.3.0 (`KnopkaSbor.exe`) сами не обновятся — их нужно один раз
+заменить вручную, скачав `OfficeMeetings.exe` из релиза.
 
 Ручная сборка:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-s -w -H windowsgui -X main.version=1.3.0 -X main.defaultTopic=$(cat topic.txt)" \
+  -ldflags "-s -w -H windowsgui -X main.version=1.3.1 -X main.defaultTopic=$(cat topic.txt)" \
   -o OfficeMeetings.exe .
 ```
 
