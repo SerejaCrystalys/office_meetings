@@ -190,7 +190,7 @@ func streamOnce(cfg Config, client *http.Client, lastID *string, onConnected fun
 			if json.Unmarshal([]byte(ev.Message), &r) == nil && r.Call != "" && r.Client != "" &&
 				validAnswer(r.Answer) {
 				r.Reason = cleanReason(r.Reason)
-				if r.Answer != ansDecline {
+				if r.Answer != ansDecline && r.Answer != ansPick { // у pick — как выбрала программа
 					r.Reason = ""
 				}
 				r.Vote = cleanVote(r.Vote)

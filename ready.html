@@ -5,8 +5,11 @@
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html { background: #0b0e0c; }
   body {
-    margin: 0; height: 100vh; display: flex; flex-direction: column; user-select: none;
+    /* Прокручивается всё окно целиком: отдельная прокрутка у списка под голосованием
+       сжималась до пары строк. */
+    margin: 0; min-height: 100vh; user-select: none; overflow-y: auto;
     background: radial-gradient(circle at 50% -10%, #2c3d2f 0%, #121815 55%, #0b0e0c 100%);
     color: #e8eae6; font-family: "Segoe UI", system-ui, sans-serif;
   }
@@ -69,6 +72,7 @@
   .ocol { flex: 1; min-width: 0; }
   .oname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ovoters { font-size: 11px; color: #a3aba2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .oprice { flex: none; font-size: 12px; color: #c9b77a; white-space: nowrap; }
   .ocnt { flex: none; min-width: 18px; text-align: right; font-weight: 700; color: #8fd36a; }
   .pickb { flex: none; padding: 3px 7px; font-size: 13px; letter-spacing: 0; text-transform: none;
     background: rgba(226,185,59,.25); box-shadow: none; border-radius: 4px; }
@@ -77,7 +81,11 @@
 
   .you { text-align: center; font-size: 15px; min-height: 22px; padding: 0 24px 6px; }
   .sum { display: flex; justify-content: center; gap: 20px; font-size: 14px; padding-bottom: 10px; }
-  ul { list-style: none; margin: 0; padding: 0 24px 18px; overflow: auto; flex: 1; }
+  ul { list-style: none; margin: 0; padding: 0 24px 18px; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.24); }
   li {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 14px; margin-bottom: 6px; background: rgba(255,255,255,.05); border-radius: 6px; font-size: 15px;
@@ -157,24 +165,35 @@
   const isPoll = () => !!(S && S.options && S.options.length);
   const voteOpen = () => isPoll() && !S.winner && !expired && S.mine !== 'decline';
 
+  // «Serbish (Пестеля 8) · 670 ₽» → ['Serbish (Пестеля 8)', '670 ₽']
+  function splitPrice(s) {
+    const i = s.lastIndexOf(' · ');
+    return i > 0 ? [s.slice(0, i), s.slice(i + 3)] : [s, ''];
+  }
+
   function renderPoll() {
     $('poll').classList.toggle('on', isPoll());
     if (!isPoll()) return;
     const open = voteOpen();
     $('plbl').textContent = S.winner ? 'Голосование'
       : open ? (S.canPick ? 'Куда идём? Клик — голос, 🏆 — решить' : 'Куда идём? Клик по месту — голос и «Принять»')
-      : S.canPick ? 'Время вышло — выбери, куда идём 🏆'
-      : 'Голосование закрыто — ждём, что решит ' + (S.from || 'инициатор');
+      : S.canPick ? 'Время вышло — выбираю по голосам…'
+      : 'Голосование закрыто — ждём итог от ' + (S.from || 'инициатора');
     $('win').classList.toggle('on', !!S.winner);
-    $('win').innerHTML = S.winner ? '🏆 Идём: <b>' + esc(S.winner) + '</b>' +
-      (S.winnerBy ? '<span>решил(а) ' + esc(S.winnerBy) + '</span>' : '') : '';
+    if (S.winner) {
+      const [wn, wp] = splitPrice(S.winner);
+      $('win').innerHTML = '🏆 Идём: <b>' + esc(wn) + '</b>' + (wp ? ' · ' + esc(wp) : '') +
+        '<span>' + esc(S.winnerWhy ? S.winnerWhy : 'решил(а) ' + (S.winnerBy || 'инициатор')) + '</span>';
+    } else $('win').innerHTML = '';
     const total = S.options.reduce((n, o) => n + o.voters.length, 0);
     $('opts').innerHTML = S.options.map((o, i) => {
       const p = total ? Math.round(o.voters.length / total * 100) : 0;
+      const [name, price] = splitPrice(o.name);
       return `<div class="opt${o.mine ? ' mine' : ''}${S.winner === o.name ? ' won' : ''}${open ? '' : ' closed'}" data-i="${i}" style="--p:${p}%">` +
-        `<div class="ocol"><div class="oname" title="${esc(o.name)}">${o.custom ? '✎ ' : ''}${esc(o.name)}</div>` +
+        `<div class="ocol"><div class="oname" title="${esc(o.name)}">${o.custom ? '✎ ' : ''}${esc(name)}</div>` +
         (o.voters.length ? `<div class="ovoters" title="${esc(o.voters.join(', '))}">${esc(o.voters.join(', '))}</div>` : '') +
-        `</div><span class="ocnt">${o.voters.length || ''}</span>` +
+        `</div>` + (price ? `<span class="oprice">${esc(price)}</span>` : '') +
+        `<span class="ocnt">${o.voters.length || ''}</span>` +
         (S.canPick && S.winner !== o.name ? `<button class="pickb" title="Идём сюда">🏆</button>` : '') + '</div>';
     }).join('');
     $('opts').querySelectorAll('.opt').forEach(el => el.onclick = e => {

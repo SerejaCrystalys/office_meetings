@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 )
 
 func newPollCall(id string, opts ...string) *callState {
@@ -227,5 +228,69 @@ func TestLunchPlacesConfig(t *testing.T) {
 		if a.votes() != want[i] {
 			t.Errorf("активность %d (%s): votes=%v", i, a.Title, a.votes())
 		}
+	}
+}
+
+func TestChooseWinner(t *testing.T) {
+	opt := func(name string, votes int) uiOption {
+		o := uiOption{Name: name, Voters: []string{}}
+		for i := 0; i < votes; i++ {
+			o.Voters = append(o.Voters, "x")
+		}
+		return o
+	}
+	if p, why := chooseWinner([]uiOption{opt("А", 1), opt("Б", 3), opt("В", 2)}); p != "Б" || why != "больше всего голосов" {
+		t.Errorf("ждали Б по голосам, получили %q (%s)", p, why)
+	}
+	// Ничья: оба лидера должны выпадать, остальные — никогда.
+	got := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		p, why := chooseWinner([]uiOption{opt("А", 2), opt("Б", 0), opt("В", 2)})
+		if p == "Б" || why == "" {
+			t.Fatalf("при ничьей выбираем только из лидеров, получили %q (%s)", p, why)
+		}
+		got[p] = true
+	}
+	if !got["А"] || !got["В"] {
+		t.Errorf("жребий должен выбирать обоих лидеров, выпали %v", got)
+	}
+	if p, _ := chooseWinner([]uiOption{opt("А", 0), opt("Б", 0)}); p == "" {
+		t.Error("никто не голосовал — всё равно выбираем место")
+	}
+}
+
+// Время вышло, инициатор не выбрал — программа выбирает сама; ручной выбор не перетирает.
+func TestAutoPick(t *testing.T) {
+	clientID = "me"
+	cfg := Config{Name: "Я"}
+	st := newPollCall("t-auto", "А", "Б")
+	addResponse(st, response{Call: st.ID, Client: "v", Name: "Вася", Answer: ansAccept, Vote: "Б"})
+	autoPick(cfg, st.ID)
+	s := snapshot(st.ID)
+	if s.Winner != "Б" || s.WinnerWhy == "" {
+		t.Fatalf("ждали автовыбор Б с причиной: %+v", s)
+	}
+
+	st2 := newPollCall("t-auto-manual", "А", "Б")
+	addResponse(st2, response{Call: st2.ID, Client: "v", Name: "Вася", Answer: ansAccept, Vote: "Б"})
+	pick(cfg, st2.ID, "А")
+	autoPick(cfg, st2.ID)
+	if s = snapshot(st2.ID); s.Winner != "А" || s.WinnerWhy != "" {
+		t.Fatalf("ручной выбор не должен перетираться автовыбором: %+v", s)
+	}
+}
+
+// Таймер автовыбора срабатывает к дедлайну.
+func TestArmAutoPick(t *testing.T) {
+	clientID = "me"
+	st := newPollCall("t-arm", "А")
+	callsMu.Lock()
+	st.Deadline = time.Now().Add(50 * time.Millisecond)
+	armAutoPick(Config{Name: "Я"}, st)
+	armAutoPick(Config{Name: "Я"}, st) // повторно — без второго таймера
+	callsMu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	if s := snapshot(st.ID); s.Winner != "А" {
+		t.Fatalf("к дедлайну место должно выбраться само: %+v", s)
 	}
 }

@@ -3,6 +3,8 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,9 +31,11 @@ type callState struct {
 	Responses map[string]response
 	Order     []string
 
-	Options  []string // голосование «куда идём»; пусто — сбор без голосования
-	Winner   string   // что выбрал инициатор
-	WinnerBy string
+	Options   []string // голосование «куда идём»; пусто — сбор без голосования
+	Winner    string   // что выбрал инициатор
+	WinnerBy  string
+	WinnerWhy string // как выбрала программа (по голосам / жребий); пусто — выбрал человек
+	autoArmed bool   // таймер автовыбора к дедлайну уже поставлен
 }
 
 type uiPerson struct {
@@ -63,10 +67,11 @@ type uiState struct {
 	Waiting    int        `json:"waiting"` // получили сбор, но молчат
 	Reasons    []string   `json:"reasons"` // подсказки причины отказа
 
-	Options  []uiOption `json:"options"` // пусто — без голосования
-	Winner   string     `json:"winner"`
-	WinnerBy string     `json:"winnerBy"`
-	CanPick  bool       `json:"canPick"` // это наш сбор — нам выбирать победителя
+	Options   []uiOption `json:"options"` // пусто — без голосования
+	Winner    string     `json:"winner"`
+	WinnerBy  string     `json:"winnerBy"`
+	WinnerWhy string     `json:"winnerWhy"` // пусто — выбрал человек
+	CanPick   bool       `json:"canPick"`   // это наш сбор — нам выбирать победителя
 }
 
 var (
@@ -130,6 +135,7 @@ func onCall(cfg Config, ev ntfyEvent) {
 	sendSeen := !mine && time.Now().Before(st.Deadline)
 	if mine {
 		addResponse(st, response{Call: ev.ID, Client: clientID, Name: cfg.Name, Answer: ansAccept})
+		armAutoPick(cfg, st)
 	} else if sendSeen {
 		seen = response{Call: ev.ID, Client: clientID, Name: cfg.Name, Answer: ansSeen}
 		addResponse(st, seen)
@@ -145,6 +151,59 @@ func onCall(cfg Config, ev ntfyEvent) {
 	}
 	setLast("Последний: " + title + " в " + start.Format("15:04") + " — " + who)
 	showReady(cfg, ev.ID)
+}
+
+// armAutoPick — на своём сборе с голосованием к дедлайну выбрать место самим, если
+// инициатор не выбрал раньше. Вызывать под callsMu; повторный вызов ничего не делает.
+func armAutoPick(cfg Config, st *callState) {
+	if st.autoArmed || len(st.Options) == 0 {
+		return
+	}
+	st.autoArmed = true
+	id := st.ID
+	time.AfterFunc(time.Until(st.Deadline), func() { autoPick(cfg, id) })
+}
+
+// autoPick — время вышло, а места нет: больше всего голосов, при равенстве — жребий.
+// Инициатор потом может передумать кнопкой 🏆.
+func autoPick(cfg Config, id string) {
+	callsMu.Lock()
+	st, ok := calls[id]
+	if !ok || st.Winner != "" || len(st.Options) == 0 {
+		callsMu.Unlock()
+		return
+	}
+	place, why := chooseWinner(pollOptions(st))
+	callsMu.Unlock()
+	pickWith(cfg, id, place, why)
+	refresh(id)
+}
+
+// chooseWinner — место с наибольшим числом голосов; при ничьей — случайное из лидеров.
+func chooseWinner(opts []uiOption) (place, why string) {
+	best := 0
+	for _, o := range opts {
+		best = max(best, len(o.Voters))
+	}
+	var top []string
+	for _, o := range opts {
+		if len(o.Voters) == best {
+			top = append(top, o.Name)
+		}
+	}
+	if len(top) == 0 {
+		return "", ""
+	}
+	place = top[rand.IntN(len(top))]
+	switch {
+	case best == 0:
+		why = "никто не голосовал — выбрал жребий"
+	case len(top) == 1:
+		why = "больше всего голосов"
+	default:
+		why = fmt.Sprintf("ничья между %d местами — выбрал жребий", len(top))
+	}
+	return place, why
 }
 
 // startCall — позвать всех из трея. Инициатор сразу считается принявшим, как в Доте.
@@ -165,6 +224,7 @@ func startCall(cfg Config, a Activity) error {
 	st, ok := calls[id] // эхо сбора могло прийти раньше ответа на POST
 	if ok {
 		addResponse(st, r)
+		armAutoPick(cfg, st)
 	}
 	callsMu.Unlock()
 	if ok {
@@ -224,6 +284,7 @@ func testCall(cfg Config, poll bool) {
 		addResponse(st, response{Call: id, Client: "demo5", Name: "Дима", Answer: ansAccept, Vote: "Шаверма у метро"})
 		addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "Уже поел"})
 		addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
+		armAutoPick(cfg, st)
 	} else {
 		addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept})
 		addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "На созвоне до 15:00"})
@@ -239,7 +300,7 @@ func testCall(cfg Config, poll bool) {
 func addResponse(st *callState, r response) {
 	if r.Answer == ansPick { // не ответ человека, а итог голосования — в список не попадает
 		if len(st.Options) > 0 && r.Vote != "" {
-			st.Winner, st.WinnerBy = r.Vote, r.Name
+			st.Winner, st.WinnerBy, st.WinnerWhy = r.Vote, r.Name, r.Reason
 		}
 		return
 	}
@@ -317,7 +378,7 @@ func snapshot(id string) uiState {
 		}
 	}
 	s.Options = pollOptions(st)
-	s.Winner, s.WinnerBy = st.Winner, st.WinnerBy
+	s.Winner, s.WinnerBy, s.WinnerWhy = st.Winner, st.WinnerBy, st.WinnerWhy
 	_, mine := myCalls[id]
 	s.CanPick = len(st.Options) > 0 && (mine || st.Local)
 	// сверху принявшие, потом молчащие, внизу отказавшиеся; ты — первым в своей группе
@@ -428,17 +489,20 @@ func revertAnswer(id string, failed, prev response) {
 }
 
 // pick — инициатор выбрал, куда идём. Повторный выбор меняет решение.
-func pick(cfg Config, id, place string) uiState {
+func pick(cfg Config, id, place string) uiState { return pickWith(cfg, id, place, "") }
+
+// pickWith — выбор места; why — как выбрала программа (пусто — выбрал человек).
+func pickWith(cfg Config, id, place, why string) uiState {
 	place = cleanVote(place)
 	callsMu.Lock()
 	st, ok := calls[id]
 	_, mine := myCalls[id]
 	var r response
-	var oldW, oldBy string
+	var oldW, oldBy, oldWhy string
 	send := false
 	if ok && place != "" && len(st.Options) > 0 && (mine || st.Local) && place != st.Winner {
-		oldW, oldBy = st.Winner, st.WinnerBy
-		r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansPick, Vote: place}
+		oldW, oldBy, oldWhy = st.Winner, st.WinnerBy, st.WinnerWhy
+		r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansPick, Vote: place, Reason: why}
 		addResponse(st, r)
 		send = !st.Local
 	}
@@ -449,7 +513,7 @@ func pick(cfg Config, id, place string) uiState {
 			if err := sendResponse(cfg, r); err != nil {
 				callsMu.Lock()
 				if st.Winner == place {
-					st.Winner, st.WinnerBy = oldW, oldBy
+					st.Winner, st.WinnerBy, st.WinnerWhy = oldW, oldBy, oldWhy
 				}
 				callsMu.Unlock()
 				refresh(id)
