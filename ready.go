@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ type callState struct {
 	WinnerBy  string
 	WinnerWhy string // как выбрала программа (по голосам / жребий); пусто — выбрал человек
 	autoArmed bool   // таймер автовыбора к дедлайну уже поставлен
+	Shared    bool   // голосование на сборе с кнопки: места и итог каждая копия считает сама
 }
 
 type uiPerson struct {
@@ -89,8 +91,8 @@ var (
 	curCall string
 )
 
-// Новый сбор (от кнопки или из чьего-то трея).
-func onCall(cfg Config, ev ntfyEvent) {
+// callFromEvent — состояние сбора из сообщения ntfy.
+func callFromEvent(cfg Config, ev ntfyEvent) *callState {
 	title := ev.Title
 	if title == "" {
 		title = "Сбор"
@@ -106,6 +108,19 @@ func onCall(cfg Config, ev ntfyEvent) {
 		Responses: map[string]response{},
 		Options:   ev.options(),
 	}
+	// Кнопка ESP32 мест не шлёт: на её «Обед» каждая копия программы выбирает места сама,
+	// перемешивая по id сбора, — при одинаковом lunch_places у всех выйдут одни и те же.
+	if len(st.Options) == 0 && st.From == "" && buttonVotes(cfg, title) {
+		st.Options = pickOptionsRand(cfg.LunchPlaces, voteOptions, seededRand(ev.ID))
+		st.Shared = len(st.Options) > 0
+	}
+	return st
+}
+
+// Новый сбор (от кнопки или из чьего-то трея).
+func onCall(cfg Config, ev ntfyEvent) {
+	st := callFromEvent(cfg, ev)
+	title, start := st.Title, st.Start
 
 	callsMu.Lock()
 	for id, c := range calls { // подчищаем старые
@@ -128,6 +143,9 @@ func onCall(cfg Config, ev ntfyEvent) {
 		addResponse(st, r)
 	}
 	delete(pending, ev.ID)
+	if st.Shared {
+		armAutoPick(cfg, st) // у сбора с кнопки нет инициатора — итог считает каждая копия сама
+	}
 	// Сообщаем остальным, что сбор до нас дошёл: пока не нажмём кнопку,
 	// у всех в окне мы будем в списке «молчат». Свой сбор уже принят в startCall.
 	var seen response
@@ -150,6 +168,10 @@ func onCall(cfg Config, ev ntfyEvent) {
 		who = "кнопка"
 	}
 	setLast("Последний: " + title + " в " + start.Format("15:04") + " — " + who)
+	if mine {
+		showResult(cfg, ev.ID) // свой сбор — только тихий сигнал
+		return
+	}
 	showReady(cfg, ev.ID)
 }
 
@@ -173,14 +195,46 @@ func autoPick(cfg Config, id string) {
 		callsMu.Unlock()
 		return
 	}
-	place, why := chooseWinner(pollOptions(st))
+	place, why := chooseWinner(pollOptions(st), seededRand(id))
+	if !st.Shared {
+		callsMu.Unlock()
+		pickWith(cfg, id, place, why)
+		refresh(id)
+		return
+	}
+	// Сбор с кнопки: в сеть ничего не шлём — у остальных копий те же голоса и тот же
+	// жребий (по id сбора), итог выйдет одинаковый.
+	addResponse(st, response{Call: id, Answer: ansPick, Vote: place, Reason: why})
+	reopen := st.Responses[clientID].Answer != ansDecline
 	callsMu.Unlock()
-	pickWith(cfg, id, place, why)
+	if reopen && !windowOpen() {
+		showResult(cfg, id)
+		return
+	}
 	refresh(id)
 }
 
-// chooseWinner — место с наибольшим числом голосов; при ничьей — случайное из лидеров.
-func chooseWinner(opts []uiOption) (place, why string) {
+// buttonVotes — включено ли голосование у активности с таким заголовком (кнопка шлёт «Обед»).
+func buttonVotes(cfg Config, title string) bool {
+	for _, a := range cfg.Activities {
+		if a.Title == title && a.votes() {
+			return true
+		}
+	}
+	return false
+}
+
+// seededRand — генератор, одинаковый у всех копий программы для одного сбора.
+func seededRand(id string) *rand.Rand {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(id))
+	s := h.Sum64()
+	return rand.New(rand.NewPCG(s, s^0x9e3779b97f4a7c15))
+}
+
+// chooseWinner — место с наибольшим числом голосов; при ничьей — жребий из лидеров.
+// r — seededRand(id сбора), чтобы у всех копий жребий выпал одинаково.
+func chooseWinner(opts []uiOption, r *rand.Rand) (place, why string) {
 	best := 0
 	for _, o := range opts {
 		best = max(best, len(o.Voters))
@@ -194,7 +248,7 @@ func chooseWinner(opts []uiOption) (place, why string) {
 	if len(top) == 0 {
 		return "", ""
 	}
-	place = top[rand.IntN(len(top))]
+	place = top[r.IntN(len(top))]
 	switch {
 	case best == 0:
 		why = "никто не голосовал — выбрал жребий"
@@ -206,7 +260,7 @@ func chooseWinner(opts []uiOption) (place, why string) {
 	return place, why
 }
 
-// startCall — позвать всех из трея. Инициатор сразу считается принявшим, как в Доте.
+// startCall — позвать всех из трея. Инициатор сразу считается принявшим.
 func startCall(cfg Config, a Activity) error {
 	if a.votes() {
 		a.options = pickOptions(cfg.LunchPlaces, voteOptions)
@@ -338,7 +392,7 @@ func onResponse(cfg Config, r response) {
 		return
 	}
 	if reopen && !windowOpen() {
-		showReady(cfg, r.Call)
+		showResult(cfg, r.Call)
 		return
 	}
 	refresh(r.Call)
@@ -553,8 +607,15 @@ func reopenLast(cfg Config) {
 	}
 }
 
+// showReady — новый сбор: звук (что выбрано в "sound") и окно.
 func showReady(cfg Config, id string) {
-	beep()
+	playAlert()
+	openWindow(cfg, id)
+}
+
+// showResult — окно с итогом голосования или свой сбор: тихий системный сигнал.
+func showResult(cfg Config, id string) {
+	playSoft()
 	openWindow(cfg, id)
 }
 

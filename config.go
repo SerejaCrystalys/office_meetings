@@ -55,6 +55,7 @@ type Config struct {
 	Proxy        string     `json:"proxy"`
 	UpdateRepo   string     `json:"update_repo"`
 	ReadyTimeout int        `json:"ready_timeout"` // секунд на ответ «принять/отклонить»
+	Sound        string     `json:"sound"`         // звук нового сбора: fun | beep | off
 	Activities   []Activity `json:"activities"`
 	// Кнопки-подсказки причины отказа. Нет ключа — стандартный список, [] — без подсказок.
 	DeclineReasons []string `json:"decline_reasons"`
@@ -105,6 +106,7 @@ func loadConfigFrom(path string) (Config, error) {
 		Topic:        defaultTopic,
 		UpdateRepo:   defaultUpdateRepo,
 		ReadyTimeout: 60,
+		Sound:        soundFun,
 		Activities:   defaultActivities,
 
 		DeclineReasons: defaultDeclineReasons,
@@ -156,6 +158,11 @@ func loadConfigFrom(path string) (Config, error) {
 	}
 	if cfg.ReadyTimeout <= 0 {
 		cfg.ReadyTimeout = 60
+	}
+	switch cfg.Sound = strings.ToLower(strings.TrimSpace(cfg.Sound)); cfg.Sound {
+	case soundFun, soundBeep, soundOff:
+	default:
+		cfg.Sound = soundFun // нет ключа или опечатка — fun
 	}
 
 	hadKey := strings.Contains(string(data), `"activities"`)

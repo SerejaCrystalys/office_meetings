@@ -29,8 +29,14 @@ var defaultLunchPlaces = []string{
 
 // pickOptions — n случайных мест из списка (порядок тоже случайный).
 func pickOptions(places []string, n int) []string {
+	return pickOptionsRand(places, n, rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())))
+}
+
+// pickOptionsRand — то же с заданным генератором: seededRand(id сбора) даёт
+// одинаковые места у всех копий программы (так голосуют на сборе с кнопки).
+func pickOptionsRand(places []string, n int, r *rand.Rand) []string {
 	p := append([]string(nil), places...)
-	rand.Shuffle(len(p), func(i, j int) { p[i], p[j] = p[j], p[i] })
+	r.Shuffle(len(p), func(i, j int) { p[i], p[j] = p[j], p[i] })
 	if len(p) > n {
 		p = p[:n]
 	}

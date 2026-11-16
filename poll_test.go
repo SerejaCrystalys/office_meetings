@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -239,13 +240,13 @@ func TestChooseWinner(t *testing.T) {
 		}
 		return o
 	}
-	if p, why := chooseWinner([]uiOption{opt("А", 1), opt("Б", 3), opt("В", 2)}); p != "Б" || why != "больше всего голосов" {
+	if p, why := chooseWinner([]uiOption{opt("А", 1), opt("Б", 3), opt("В", 2)}, seededRand("x")); p != "Б" || why != "больше всего голосов" {
 		t.Errorf("ждали Б по голосам, получили %q (%s)", p, why)
 	}
 	// Ничья: оба лидера должны выпадать, остальные — никогда.
 	got := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		p, why := chooseWinner([]uiOption{opt("А", 2), opt("Б", 0), opt("В", 2)})
+		p, why := chooseWinner([]uiOption{opt("А", 2), opt("Б", 0), opt("В", 2)}, seededRand(fmt.Sprint(i)))
 		if p == "Б" || why == "" {
 			t.Fatalf("при ничьей выбираем только из лидеров, получили %q (%s)", p, why)
 		}
@@ -254,7 +255,7 @@ func TestChooseWinner(t *testing.T) {
 	if !got["А"] || !got["В"] {
 		t.Errorf("жребий должен выбирать обоих лидеров, выпали %v", got)
 	}
-	if p, _ := chooseWinner([]uiOption{opt("А", 0), opt("Б", 0)}); p == "" {
+	if p, _ := chooseWinner([]uiOption{opt("А", 0), opt("Б", 0)}, seededRand("x")); p == "" {
 		t.Error("никто не голосовал — всё равно выбираем место")
 	}
 }
@@ -292,5 +293,87 @@ func TestArmAutoPick(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if s := snapshot(st.ID); s.Winner != "А" {
 		t.Fatalf("к дедлайну место должно выбраться само: %+v", s)
+	}
+}
+
+// Сбор «Обед» с кнопки: у всех копий одни и те же места (по id сбора), без инициатора.
+func TestButtonLunchCall(t *testing.T) {
+	places := []string{"1", "2", "3", "4", "5", "6", "7", "8"}
+	cfg := Config{ReadyTimeout: 60, LunchPlaces: places, Activities: defaultActivities}
+	ev := ntfyEvent{ID: "btn-1", Time: time.Now().Unix(), Title: "Обед", Message: "Сбор на обед!"}
+	a, b := callFromEvent(cfg, ev), callFromEvent(cfg, ev)
+	if !a.Shared || len(a.Options) != voteOptions || fmt.Sprint(a.Options) != fmt.Sprint(b.Options) {
+		t.Fatalf("ждали одинаковые %d мест у всех копий: %v / %v", voteOptions, a.Options, b.Options)
+	}
+	ev2 := ev
+	ev2.ID = "btn-2"
+	diff := false
+	for i := 0; i < 5 && !diff; i++ { // у разных сборов места разные (почти всегда)
+		ev2.ID = fmt.Sprint("btn-x", i)
+		diff = fmt.Sprint(callFromEvent(cfg, ev2).Options) != fmt.Sprint(a.Options)
+	}
+	if !diff {
+		t.Error("у разных сборов места должны меняться")
+	}
+	if c := callFromEvent(cfg, ntfyEvent{ID: "btn-3", Title: "Курилка"}); len(c.Options) != 0 {
+		t.Errorf("курилка с кнопки — без голосования: %v", c.Options)
+	}
+	if c := callFromEvent(cfg, ntfyEvent{ID: "tray-1", Title: "Обед", Tags: []string{"from:Вася"}}); c.Shared || len(c.Options) != 0 {
+		t.Errorf("сбор из трея без мест (старая версия) — сами места не придумываем: %v", c.Options)
+	}
+}
+
+// К дедлайну сбора с кнопки каждая копия считает итог сама и одинаково (жребий по id).
+func TestButtonAutoPick(t *testing.T) {
+	clientID = "me"
+	results := map[string]bool{}
+	for i := 0; i < 2; i++ { // две «копии» с одинаковыми голосами
+		id := "btn-auto"
+		st := newPollCall(fmt.Sprint(id, i), "А", "Б", "В")
+		callsMu.Lock()
+		st.ID, st.Local, st.Shared = id, false, true
+		delete(calls, fmt.Sprint(id, i))
+		calls[id] = st
+		callsMu.Unlock()
+		addResponse(st, response{Call: id, Client: "me", Name: "Я", Answer: ansDecline}) // окно не открываем
+		addResponse(st, response{Call: id, Client: "v", Name: "Вася", Answer: ansAccept, Vote: "А"})
+		addResponse(st, response{Call: id, Client: "m", Name: "Маша", Answer: ansAccept, Vote: "В"})
+		autoPick(Config{Name: "Я"}, id)
+		s := snapshot(id)
+		if s.Winner != "А" && s.Winner != "В" || s.WinnerWhy == "" || s.CanPick {
+			t.Fatalf("ждали жребий между А и В без кнопки 🏆: %+v", s)
+		}
+		results[s.Winner] = true
+	}
+	if len(results) != 1 {
+		t.Fatalf("у копий с одинаковыми голосами итог должен совпасть: %v", results)
+	}
+}
+
+func TestFunWAV(t *testing.T) {
+	b := funWAV()
+	if string(b[:4]) != "RIFF" || string(b[8:16]) != "WAVEfmt " || string(b[36:40]) != "data" {
+		t.Fatal("заголовок WAV неправильный")
+	}
+	if n := len(b) - 44; n != int(22050*1.8)*2 { // 1,8 с × 22 050 Гц × 2 байта
+		t.Fatalf("ждали 1,8 с звука, байт данных %d", n)
+	}
+}
+
+func TestSoundConfig(t *testing.T) {
+	p := t.TempDir() + "/config.json"
+	for body, want := range map[string]string{
+		`{"topic":"t"}`:                soundFun,
+		`{"topic":"t","sound":"OFF"}`:  soundOff,
+		`{"topic":"t","sound":"beep"}`: soundBeep,
+		`{"topic":"t","sound":"бум"}`:  soundFun,
+	} {
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfigFrom(p)
+		if err != nil || cfg.Sound != want {
+			t.Errorf("%s: ждали %q, получили %q (%v)", body, want, cfg.Sound, err)
+		}
 	}
 }

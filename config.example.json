@@ -6,6 +6,7 @@
   "proxy": "",
   "update_repo": "SerejaCrystalys/office_meetings",
   "ready_timeout": 60,
+  "sound": "fun",
   "activities": [
     {
       "menu": "🚬 Позвать на курилку",

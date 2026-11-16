@@ -119,6 +119,7 @@ func main() {
 	}
 	clientID = newClientID()
 	declineReasons = cfg.DeclineReasons
+	soundMode = cfg.Sound
 
 	systray.Run(func() {
 		systray.SetIcon(iconOff)
