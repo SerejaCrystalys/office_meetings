@@ -1,0 +1,6 @@
+# секреты и сборки — в репозиторий не попадают
+topic.txt
+config.json
+*.exe
+*.exe.new
+*.exe.old
