@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -36,8 +37,21 @@ type Config struct {
 	Activities   []Activity `json:"activities"`
 }
 
+// ntfy принимает имена топиков только из [-_A-Za-z0-9], длиной 1–64.
+const maxTopicLen = 64
+
+var topicRe = regexp.MustCompile(`^[-_A-Za-z0-9]{1,64}$`)
+
 // Топик для ответов «принял/отклонил» — отдельный, чтобы не шуметь в телефонах.
-func (c Config) RespTopic() string { return c.Topic + "-r" }
+// «<топик>-r» не должен вылезти за лимит ntfy: у длинного топика (63–64 символа)
+// берём первые 62 символа. Правило одинаковое у всех копий программы.
+func (c Config) RespTopic() string {
+	base := c.Topic
+	if len(base) > maxTopicLen-2 {
+		base = base[:maxTopicLen-2]
+	}
+	return base + "-r"
+}
 
 func configPath() string {
 	exe, err := os.Executable()
@@ -100,6 +114,10 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.Topic == "" {
 		return cfg, errors.New("не задан топик: впиши \"topic\" в config.json")
+	}
+	if !topicRe.MatchString(cfg.Topic) {
+		return cfg, fmt.Errorf("неправильный топик в config.json: нужны только латинские буквы, цифры, «-» и «_», не длиннее %d символов (сейчас %d)",
+			maxTopicLen, len(cfg.Topic))
 	}
 	cfg.UpdateRepo = strings.Trim(strings.TrimSpace(cfg.UpdateRepo), "/")
 	if cfg.UpdateRepo == "" {
