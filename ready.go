@@ -336,8 +336,9 @@ func showReady(cfg Config, id string) {
 	beep()
 	winMu.Lock()
 	if curWin != nil { // новый сбор вытесняет старое окно
-		old := curWin
-		old.Dispatch(func() { old.Terminate() })
+		// Только Destroy (WM_CLOSE → DestroyWindow → WM_DESTROY → выход из Run).
+		// Terminate лишь глушит цикл сообщений, а окно остаётся висеть «Не отвечает».
+		curWin.Destroy()
 		curWin, curCall = nil, ""
 	}
 	winMu.Unlock()
@@ -376,7 +377,7 @@ func runWindow(cfg Config, id string) {
 
 	_ = w.Bind("getState", func() uiState { return snapshot(id) })
 	_ = w.Bind("answer", func(a, reason string) uiState { return answer(cfg, id, a, reason) })
-	_ = w.Bind("closeWindow", func() { w.Dispatch(func() { w.Terminate() }) })
+	_ = w.Bind("closeWindow", func() { w.Destroy() }) // см. showReady: не Terminate
 	w.SetHtml(readyHTML)
 
 	winMu.Lock()

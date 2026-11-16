@@ -162,7 +162,8 @@
     const allAnswered = !!S.mine && S.waiting === 0;
     if (left <= 0 || allAnswered) { if (closeAt === null) closeAt = now + CLOSE_DELAY; }
     else closeAt = null;
-    if (closeAt !== null && now >= closeAt) { closeAt = Infinity; closeWindow(); return; }
+    if (closeAt === Infinity) return; // закрытие уже запрошено
+    if (closeAt !== null && now >= closeAt) { closeAt = Infinity; $('left').textContent = 'Закрываю…'; closeWindow(); return; }
     const closing = closeAt !== null ? ' · закроется через ' + Math.max(1, Math.ceil((closeAt - now) / 1000)) + ' с' : '';
     $('left').textContent = (left > 0 ? (allAnswered ? 'Все ответили' : 'Осталось ' + Math.ceil(left / 1000) + ' с')
       : 'Время вышло') + closing;
