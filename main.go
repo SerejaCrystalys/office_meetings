@@ -52,12 +52,26 @@ const (
 	silenceLimit      = 2 * time.Minute                   // нет даже keepalive — переподключаемся
 )
 
+// Activity — то, на что можно позвать из трея (курилка, обед, кофе, созвон…).
+type Activity struct {
+	Menu     string `json:"menu,omitempty"`     // текст пункта в трее (по умолчанию = title)
+	Title    string `json:"title"`              // заголовок уведомления
+	Message  string `json:"message"`            // текст уведомления
+	Priority int    `json:"priority,omitempty"` // 1–5, по умолчанию 4
+}
+
+var defaultActivities = []Activity{
+	{Menu: "🚬 Позвать на курилку", Title: "Курилка", Message: "🚬 Сбор на курилку!"},
+	{Menu: "🍲 Позвать на обед", Title: "Обед", Message: "🍲 Сбор на обед!"},
+}
+
 type Config struct {
-	Server     string `json:"server"`
-	Topic      string `json:"topic"`
-	Token      string `json:"token"`
-	Proxy      string `json:"proxy"`
-	UpdateRepo string `json:"update_repo"`
+	Server     string     `json:"server"`
+	Topic      string     `json:"topic"`
+	Token      string     `json:"token"`
+	Proxy      string     `json:"proxy"`
+	UpdateRepo string     `json:"update_repo"`
+	Activities []Activity `json:"activities"`
 }
 
 type ntfyEvent struct {
@@ -305,7 +319,7 @@ func configPath() string {
 
 func loadConfig() (Config, error) {
 	path := configPath()
-	cfg := Config{Server: defaultServer, Topic: defaultTopic, UpdateRepo: defaultUpdateRepo}
+	cfg := Config{Server: defaultServer, Topic: defaultTopic, UpdateRepo: defaultUpdateRepo, Activities: defaultActivities}
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -334,6 +348,32 @@ func loadConfig() (Config, error) {
 	if cfg.UpdateRepo == "" {
 		cfg.UpdateRepo = defaultUpdateRepo
 	}
+
+	// Чистим активности: без заголовка и текста — пропускаем
+	var acts []Activity
+	for _, a := range cfg.Activities {
+		a.Title, a.Message, a.Menu = strings.TrimSpace(a.Title), strings.TrimSpace(a.Message), strings.TrimSpace(a.Menu)
+		if a.Title == "" && a.Message == "" {
+			continue
+		}
+		if a.Title == "" {
+			a.Title = "Кнопка сбора"
+		}
+		if a.Message == "" {
+			a.Message = a.Title
+		}
+		if a.Menu == "" {
+			a.Menu = "Позвать: " + a.Title
+		}
+		if a.Priority < 1 || a.Priority > 5 {
+			a.Priority = 4
+		}
+		acts = append(acts, a)
+	}
+	if acts == nil && cfg.Activities == nil {
+		acts = defaultActivities // ключа нет вовсе — берём стандартные
+	}
+	cfg.Activities = acts
 	return cfg, nil
 }
 
@@ -470,12 +510,16 @@ func streamOnce(cfg Config, client *http.Client, lastID *string, onConnected fun
 	return errors.New("сервер закрыл соединение")
 }
 
-func publish(cfg Config, title, message string) error {
+func publish(cfg Config, a Activity) error {
+	prio := a.Priority
+	if prio == 0 {
+		prio = 4
+	}
 	body, _ := json.Marshal(map[string]any{
 		"topic":    cfg.Topic,
-		"title":    title,
-		"message":  message,
-		"priority": 4,
+		"title":    a.Title,
+		"message":  a.Message,
+		"priority": prio,
 	})
 	req, err := http.NewRequest(http.MethodPost, cfg.Server+"/", bytes.NewReader(body))
 	if err != nil {
@@ -499,7 +543,12 @@ func publish(cfg Config, title, message string) error {
 // ---------- main ----------
 
 func main() {
-	afterUpdate := len(os.Args) > 1 && os.Args[1] == "--after-update"
+	arg := ""
+	if len(os.Args) > 1 {
+		arg = os.Args[1]
+	}
+	afterUpdate := arg == "--after-update"
+	restarted := arg == "--restart"
 	if exe, err := os.Executable(); err == nil {
 		go func() { // старую копию удаляем, когда она точно закрылась
 			for i := 0; i < 20; i++ {
@@ -511,7 +560,7 @@ func main() {
 			}
 		}()
 	}
-	if !singleInstance(afterUpdate) {
+	if !singleInstance(afterUpdate || restarted) {
 		messageBox("Кнопка сбора", "Слушатель уже запущен — ищи значок в трее.", mbOK|mbIconInfo)
 		return
 	}
@@ -535,12 +584,29 @@ func main() {
 		uiMu.Unlock()
 
 		systray.AddSeparator()
-		callSmoke := systray.AddMenuItem("🚬 Позвать на курилку", "")
-		callLunch := systray.AddMenuItem("🍲 Позвать на обед", "")
+		send := func(a Activity) {
+			if err := publish(cfg, a); err != nil {
+				messageBox("Кнопка сбора", "Не удалось отправить: "+err.Error(), mbOK|mbIconError)
+			}
+		}
+		if len(cfg.Activities) == 0 {
+			empty := systray.AddMenuItem("Нет активностей в config.json", "")
+			empty.Disable()
+		}
+		for _, a := range cfg.Activities {
+			a := a
+			item := systray.AddMenuItem(a.Menu, a.Message)
+			go func() {
+				for range item.ClickedCh {
+					go send(a)
+				}
+			}()
+		}
 		systray.AddSeparator()
 		test := systray.AddMenuItem("Проверить уведомление", "")
 		autostart := systray.AddMenuItemCheckbox("Запускать вместе с Windows", "", autostartEnabled())
 		openCfg := systray.AddMenuItem("Открыть настройки (config.json)", "")
+		reload := systray.AddMenuItem("Перезапустить (применить настройки)", "")
 		systray.AddSeparator()
 		verItem := systray.AddMenuItem("Версия "+version, "")
 		verItem.Disable()
@@ -553,19 +619,9 @@ func main() {
 
 		go subscribe(cfg)
 
-		send := func(title, msg string) {
-			if err := publish(cfg, title, msg); err != nil {
-				messageBox("Кнопка сбора", "Не удалось отправить: "+err.Error(), mbOK|mbIconError)
-			}
-		}
-
 		go func() {
 			for {
 				select {
-				case <-callSmoke.ClickedCh:
-					go send("Курилка", "🚬 Сбор на курилку!")
-				case <-callLunch.ClickedCh:
-					go send("Обед", "🍲 Сбор на обед!")
 				case <-test.ClickedCh:
 					notify("Проверка", "Уведомления работают 👍")
 				case <-autostart.ClickedCh:
@@ -577,6 +633,14 @@ func main() {
 					} else {
 						autostart.Uncheck()
 					}
+				case <-reload.ClickedCh:
+					if exe, err := os.Executable(); err == nil {
+						if err := exec.Command(exe, "--restart").Start(); err == nil {
+							systray.Quit()
+							return
+						}
+					}
+					messageBox("Кнопка сбора", "Не удалось перезапуститься", mbOK|mbIconError)
 				case <-upd.ClickedCh:
 					go checkUpdates(cfg)
 				case <-openCfg.ClickedCh:
