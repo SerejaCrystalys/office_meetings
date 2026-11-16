@@ -19,7 +19,23 @@ type Activity struct {
 	Title    string `json:"title"`              // заголовок уведомления
 	Message  string `json:"message"`            // текст уведомления
 	Priority int    `json:"priority,omitempty"` // 1–5, по умолчанию 4
+	// Голосование за место: в сбор уходят voteOptions случайных мест из lunch_places
+	// плюс «Другое». Нет ключа — включено только у активности «Обед».
+	Vote *bool `json:"vote,omitempty"`
+
+	options []string // варианты конкретного сбора, выбираются при отправке
 }
+
+// votes — нужно ли голосование за место у этой активности.
+func (a Activity) votes() bool {
+	if a.Vote != nil {
+		return *a.Vote
+	}
+	return a.Title == "Обед"
+}
+
+// Сколько случайных мест попадает в голосование (плюс «Другое»).
+const voteOptions = 5
 
 var defaultActivities = []Activity{
 	{Menu: "🚬 Позвать на курилку", Title: "Курилка", Message: "🚬 Сбор на курилку!"},
@@ -42,6 +58,8 @@ type Config struct {
 	Activities   []Activity `json:"activities"`
 	// Кнопки-подсказки причины отказа. Нет ключа — стандартный список, [] — без подсказок.
 	DeclineReasons []string `json:"decline_reasons"`
+	// Места для голосования «куда идём». Нет ключа — список у офиса (places.go), [] — без голосования.
+	LunchPlaces []string `json:"lunch_places"`
 }
 
 // ntfy принимает имена топиков только из [-_A-Za-z0-9], длиной 1–64.
@@ -90,6 +108,7 @@ func loadConfigFrom(path string) (Config, error) {
 		Activities:   defaultActivities,
 
 		DeclineReasons: defaultDeclineReasons,
+		LunchPlaces:    defaultLunchPlaces,
 	}
 
 	data, err := os.ReadFile(path)
@@ -104,6 +123,7 @@ func loadConfigFrom(path string) (Config, error) {
 
 	cfg.Activities = nil
 	cfg.DeclineReasons = nil
+	cfg.LunchPlaces = nil
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("ошибка в config.json: %w", err)
 	}
@@ -174,6 +194,20 @@ func loadConfigFrom(path string) (Config, error) {
 		reasons = defaultDeclineReasons
 	}
 	cfg.DeclineReasons = reasons
+
+	places := []string{}
+	dup := map[string]bool{}
+	for _, p := range cfg.LunchPlaces {
+		p = cleanVote(p)
+		if k := strings.ToLower(p); p != "" && !dup[k] {
+			dup[k] = true
+			places = append(places, p)
+		}
+	}
+	if !strings.Contains(string(data), `"lunch_places"`) {
+		places = defaultLunchPlaces
+	}
+	cfg.LunchPlaces = places
 	return cfg, nil
 }
 

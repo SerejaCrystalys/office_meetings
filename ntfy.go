@@ -42,6 +42,35 @@ func (ev ntfyEvent) initiator() string {
 	return ""
 }
 
+// Варианты голосования «куда идём» едут тегами «vote:<место>» в том же сообщении-сборе.
+const voteTagPrefix = "vote:"
+
+func voteTag(place string) string { return voteTagPrefix + cleanVote(place) }
+
+// options — варианты голосования из тегов сбора (в том порядке, как их отправили).
+func (ev ntfyEvent) options() []string {
+	var out []string
+	for _, t := range ev.Tags {
+		if strings.HasPrefix(t, voteTagPrefix) {
+			if o := cleanVote(strings.TrimPrefix(t, voteTagPrefix)); o != "" && len(out) < voteOptions {
+				out = append(out, o)
+			}
+		}
+	}
+	return out
+}
+
+const maxVoteLen = 60 // символов
+
+// cleanVote — название места в одну строку, без запятых (ntfy режет по ним теги).
+func cleanVote(s string) string {
+	s = strings.Join(strings.Fields(strings.ReplaceAll(s, ",", " ")), " ")
+	if r := []rune(s); len(r) > maxVoteLen {
+		s = string(r[:maxVoteLen])
+	}
+	return s
+}
+
 const maxNameLen = 32
 
 // cleanName — имя в одну строку, не длиннее maxNameLen символов.
@@ -58,8 +87,9 @@ type response struct {
 	Call   string `json:"call"`   // id сообщения-сбора в ntfy
 	Client string `json:"client"` // id копии программы (чтобы не путать тёзок)
 	Name   string `json:"name"`
-	Answer string `json:"answer"`           // accept | decline | seen
+	Answer string `json:"answer"`           // accept | decline | seen | pick
 	Reason string `json:"reason,omitempty"` // почему отклонил (только для decline, необязательно)
+	Vote   string `json:"vote,omitempty"`   // accept: за какое место голос; pick: выбранное место
 }
 
 const maxReasonLen = 80 // символов
@@ -79,9 +109,12 @@ const (
 	ansAccept  = "accept"
 	ansDecline = "decline"
 	ansSeen    = "seen"
+	ansPick    = "pick" // инициатор выбрал, куда идём (место в Vote); старые версии такое игнорируют
 )
 
-func validAnswer(a string) bool { return a == ansAccept || a == ansDecline || a == ansSeen }
+func validAnswer(a string) bool {
+	return a == ansAccept || a == ansDecline || a == ansSeen || a == ansPick
+}
 
 func subscribe(cfg Config) {
 	client := newClient(cfg, 0) // поток бесконечный, общий таймаут не ставим
@@ -160,7 +193,13 @@ func streamOnce(cfg Config, client *http.Client, lastID *string, onConnected fun
 				if r.Answer != ansDecline {
 					r.Reason = ""
 				}
-				onResponse(r)
+				r.Vote = cleanVote(r.Vote)
+				if r.Answer != ansAccept && r.Answer != ansPick {
+					r.Vote = ""
+				}
+				if r.Answer != ansPick || r.Vote != "" {
+					onResponse(cfg, r)
+				}
 			}
 			continue
 		}
@@ -228,7 +267,11 @@ var retryPauses = []time.Duration{0, 700 * time.Millisecond, 2 * time.Second}
 
 // publish отправляет сбор от имени cfg.Name и возвращает id сбора в ntfy.
 func publish(cfg Config, a Activity) (string, error) {
-	return publishRaw(cfg, cfg.Topic, a.Title, a.Message, a.Priority, []string{fromTag(cfg.Name)})
+	tags := []string{fromTag(cfg.Name)}
+	for _, o := range a.options {
+		tags = append(tags, voteTag(o))
+	}
+	return publishRaw(cfg, cfg.Topic, a.Title, a.Message, a.Priority, tags)
 }
 
 // sendResponse повторяет отправку при обрыве: дубль ответа безвреден — от одной копии

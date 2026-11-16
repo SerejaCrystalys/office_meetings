@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,10 @@ type callState struct {
 	Local     bool // проверочный, в сеть не уходит
 	Responses map[string]response
 	Order     []string
+
+	Options  []string // голосование «куда идём»; пусто — сбор без голосования
+	Winner   string   // что выбрал инициатор
+	WinnerBy string
 }
 
 type uiPerson struct {
@@ -34,6 +39,14 @@ type uiPerson struct {
 	Answer string `json:"answer"`
 	Reason string `json:"reason,omitempty"`
 	Me     bool   `json:"me"`
+}
+
+// uiOption — строка голосования: место и кто за него.
+type uiOption struct {
+	Name   string   `json:"name"`
+	Voters []string `json:"voters"`
+	Mine   bool     `json:"mine"`
+	Custom bool     `json:"custom"` // вписали в «Другое»
 }
 
 type uiState struct {
@@ -49,6 +62,11 @@ type uiState struct {
 	Declined   int        `json:"declined"`
 	Waiting    int        `json:"waiting"` // получили сбор, но молчат
 	Reasons    []string   `json:"reasons"` // подсказки причины отказа
+
+	Options  []uiOption `json:"options"` // пусто — без голосования
+	Winner   string     `json:"winner"`
+	WinnerBy string     `json:"winnerBy"`
+	CanPick  bool       `json:"canPick"` // это наш сбор — нам выбирать победителя
 }
 
 var (
@@ -56,6 +74,7 @@ var (
 	calls    = map[string]*callState{}
 	pending  = map[string][]response{} // ответы, пришедшие раньше самого сбора
 	myCalls  = map[string]time.Time{}  // сборы, которые позвали мы (id → когда)
+	lastCall string                    // последний сбор — его окно можно открыть из трея
 	clientID string
 
 	declineReasons = defaultDeclineReasons // из config.json, задаётся в main
@@ -80,6 +99,7 @@ func onCall(cfg Config, ev ntfyEvent) {
 		Start:     start,
 		Deadline:  start.Add(time.Duration(cfg.ReadyTimeout) * time.Second),
 		Responses: map[string]response{},
+		Options:   ev.options(),
 	}
 
 	callsMu.Lock()
@@ -98,6 +118,7 @@ func onCall(cfg Config, ev ntfyEvent) {
 		return
 	}
 	calls[ev.ID] = st
+	lastCall = ev.ID
 	for _, r := range pending[ev.ID] {
 		addResponse(st, r)
 	}
@@ -128,6 +149,9 @@ func onCall(cfg Config, ev ntfyEvent) {
 
 // startCall — позвать всех из трея. Инициатор сразу считается принявшим, как в Доте.
 func startCall(cfg Config, a Activity) error {
+	if a.votes() {
+		a.options = pickOptions(cfg.LunchPlaces, voteOptions)
+	}
 	id, err := publishCall(cfg, a)
 	if err != nil {
 		return err
@@ -181,8 +205,9 @@ func findMyCall(cfg Config, a Activity, sent time.Time) string {
 	return ""
 }
 
-// Локальная проверка окна — никому не отправляется.
-func testCall(cfg Config) {
+// Локальная проверка окна — никому не отправляется. poll — с голосованием «куда идём»,
+// как будто позвал ты сам (можно выбрать победителя).
+func testCall(cfg Config, poll bool) {
 	id := "local-" + time.Now().Format("150405.000")
 	now := time.Now()
 	st := &callState{
@@ -190,10 +215,21 @@ func testCall(cfg Config) {
 		Start: now, Deadline: now.Add(time.Duration(cfg.ReadyTimeout) * time.Second),
 		Local: true, Responses: map[string]response{},
 	}
-	addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept})
-	addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "На созвоне до 15:00"})
-	addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
-	addResponse(st, response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansSeen})
+	if poll && len(cfg.LunchPlaces) > 0 {
+		st.Title, st.Message, st.From = "Обед", "🍲 Сбор на обед! (проверка)", cleanName(cfg.Name)
+		st.Options = pickOptions(cfg.LunchPlaces, voteOptions)
+		addResponse(st, response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansAccept})
+		addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept, Vote: st.Options[0]})
+		addResponse(st, response{Call: id, Client: "demo4", Name: "Маша", Answer: ansAccept, Vote: st.Options[0]})
+		addResponse(st, response{Call: id, Client: "demo5", Name: "Дима", Answer: ansAccept, Vote: "Шаверма у метро"})
+		addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "Уже поел"})
+		addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
+	} else {
+		addResponse(st, response{Call: id, Client: "demo1", Name: "Вася", Answer: ansAccept})
+		addResponse(st, response{Call: id, Client: "demo2", Name: "Петя", Answer: ansDecline, Reason: "На созвоне до 15:00"})
+		addResponse(st, response{Call: id, Client: "demo3", Name: "Коля", Answer: ansSeen})
+		addResponse(st, response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansSeen})
+	}
 	callsMu.Lock()
 	calls[id] = st
 	callsMu.Unlock()
@@ -201,6 +237,12 @@ func testCall(cfg Config) {
 }
 
 func addResponse(st *callState, r response) {
+	if r.Answer == ansPick { // не ответ человека, а итог голосования — в список не попадает
+		if len(st.Options) > 0 && r.Vote != "" {
+			st.Winner, st.WinnerBy = r.Vote, r.Name
+		}
+		return
+	}
 	old, ok := st.Responses[r.Client]
 	if !ok {
 		st.Order = append(st.Order, r.Client)
@@ -216,18 +258,29 @@ func answered(st *callState, client string) bool {
 	return ok && r.Answer != ansSeen
 }
 
-func onResponse(r response) {
+func onResponse(cfg Config, r response) {
 	callsMu.Lock()
 	st, ok := calls[r.Call]
+	reopen := false
 	if ok {
+		old := st.Winner
 		addResponse(st, r)
+		// Инициатор выбрал место: тем, кто не отказался, показываем итог,
+		// даже если окно уже закрылось.
+		reopen = r.Answer == ansPick && st.Winner != old && r.Client != clientID &&
+			st.Responses[clientID].Answer != ansDecline
 	} else if len(pending) < 100 {
 		pending[r.Call] = append(pending[r.Call], r)
 	}
 	callsMu.Unlock()
-	if ok {
-		refresh(r.Call)
+	if !ok {
+		return
 	}
+	if reopen && !windowOpen() {
+		showReady(cfg, r.Call)
+		return
+	}
+	refresh(r.Call)
 }
 
 func snapshot(id string) uiState {
@@ -263,6 +316,10 @@ func snapshot(id string) uiState {
 			s.Waiting++
 		}
 	}
+	s.Options = pollOptions(st)
+	s.Winner, s.WinnerBy = st.Winner, st.WinnerBy
+	_, mine := myCalls[id]
+	s.CanPick = len(st.Options) > 0 && (mine || st.Local)
 	// сверху принявшие, потом молчащие, внизу отказавшиеся; ты — первым в своей группе
 	rank := map[string]int{ansAccept: 0, ansSeen: 1, ansDecline: 2}
 	sort.SliceStable(s.People, func(i, j int) bool {
@@ -275,8 +332,43 @@ func snapshot(id string) uiState {
 	return s
 }
 
-// answer — человек нажал кнопку; reason учитывается только для отказа.
-func answer(cfg Config, id, ans, reason string) uiState {
+// pollOptions — строки голосования: сначала места из сбора, потом вписанные в «Другое».
+func pollOptions(st *callState) []uiOption {
+	opts := []uiOption{}
+	if len(st.Options) == 0 {
+		return opts
+	}
+	find := func(name string) int {
+		return slices.IndexFunc(opts, func(o uiOption) bool { return strings.EqualFold(o.Name, name) })
+	}
+	add := func(name string) int {
+		if i := find(name); i >= 0 {
+			return i
+		}
+		opts = append(opts, uiOption{Name: name, Voters: []string{}, Custom: len(opts) >= len(st.Options)})
+		return len(opts) - 1
+	}
+	for _, o := range st.Options {
+		add(o)
+	}
+	for _, c := range st.Order {
+		r := st.Responses[c]
+		if r.Answer != ansAccept || r.Vote == "" {
+			continue
+		}
+		i := add(r.Vote)
+		opts[i].Voters = append(opts[i].Voters, r.Name)
+		opts[i].Mine = opts[i].Mine || c == clientID
+	}
+	if st.Winner != "" {
+		add(st.Winner) // выбрали место, за которое уже никто не голосует
+	}
+	return opts
+}
+
+// answer — человек нажал кнопку; reason учитывается только для отказа,
+// vote (место) — только для «Принять» в сборе с голосованием.
+func answer(cfg Config, id, ans, reason, vote string) uiState {
 	if ans != ansAccept && ans != ansDecline {
 		return snapshot(id)
 	}
@@ -284,13 +376,21 @@ func answer(cfg Config, id, ans, reason string) uiState {
 	if ans != ansDecline {
 		reason = ""
 	}
+	vote = cleanVote(vote)
 	callsMu.Lock()
 	st, ok := calls[id]
-	var r response
+	var r, prev response
 	send := false
 	if ok && time.Now().Before(st.Deadline) {
-		if !answered(st, clientID) {
-			r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ans, Reason: reason}
+		polling := len(st.Options) > 0 && st.Winner == ""
+		if !polling || ans != ansAccept {
+			vote = ""
+		}
+		prev = st.Responses[clientID]
+		// Пока голосование идёт, голос можно поменять — это просто новый accept.
+		revote := polling && ans == ansAccept && prev.Answer == ansAccept && vote != prev.Vote
+		if !answered(st, clientID) || revote {
+			r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ans, Reason: reason, Vote: vote}
 			addResponse(st, r)
 			send = !st.Local
 		}
@@ -300,24 +400,64 @@ func answer(cfg Config, id, ans, reason string) uiState {
 	if send {
 		go func() {
 			if err := sendResponse(cfg, r); err != nil {
-				revertAnswer(id, r)
+				revertAnswer(id, r, prev)
 				refresh(id)
-				messageBox("Office Meetings", "Ответ не ушёл: "+err.Error()+"\n\nНажми «Принять» или «Отклонить» ещё раз.", mbOK|mbIconError)
+				messageBox("Office Meetings", "Ответ не ушёл: "+err.Error()+"\n\nНажми ещё раз.", mbOK|mbIconError)
 			}
 		}()
 	}
 	return snapshot(id)
 }
 
-// revertAnswer — ответ так и не ушёл: снова «молчим», чтобы кнопки в окне ожили.
-// Если ответ на самом деле дошёл (оборвалось уже после), его эхо из ntfy вернёт всё как было.
-func revertAnswer(id string, r response) {
+// revertAnswer — ответ так и не ушёл: возвращаем прежний (или снова «молчим»), чтобы
+// кнопки в окне ожили. Если ответ на самом деле дошёл (оборвалось уже после),
+// его эхо из ntfy вернёт всё как было.
+func revertAnswer(id string, failed, prev response) {
 	callsMu.Lock()
 	defer callsMu.Unlock()
-	if st, ok := calls[id]; ok && st.Responses[r.Client] == r {
-		r.Answer = ansSeen
-		st.Responses[r.Client] = r
+	st, ok := calls[id]
+	if !ok || st.Responses[failed.Client] != failed {
+		return
 	}
+	if prev.Answer == ansAccept || prev.Answer == ansDecline {
+		st.Responses[failed.Client] = prev
+		return
+	}
+	failed.Answer, failed.Reason, failed.Vote = ansSeen, "", ""
+	st.Responses[failed.Client] = failed
+}
+
+// pick — инициатор выбрал, куда идём. Повторный выбор меняет решение.
+func pick(cfg Config, id, place string) uiState {
+	place = cleanVote(place)
+	callsMu.Lock()
+	st, ok := calls[id]
+	_, mine := myCalls[id]
+	var r response
+	var oldW, oldBy string
+	send := false
+	if ok && place != "" && len(st.Options) > 0 && (mine || st.Local) && place != st.Winner {
+		oldW, oldBy = st.Winner, st.WinnerBy
+		r = response{Call: id, Client: clientID, Name: cfg.Name, Answer: ansPick, Vote: place}
+		addResponse(st, r)
+		send = !st.Local
+	}
+	callsMu.Unlock()
+
+	if send {
+		go func() {
+			if err := sendResponse(cfg, r); err != nil {
+				callsMu.Lock()
+				if st.Winner == place {
+					st.Winner, st.WinnerBy = oldW, oldBy
+				}
+				callsMu.Unlock()
+				refresh(id)
+				messageBox("Office Meetings", "Выбор не ушёл: "+err.Error()+"\n\nВыбери место ещё раз.", mbOK|mbIconError)
+			}
+		}()
+	}
+	return snapshot(id)
 }
 
 func refresh(id string) {
@@ -332,8 +472,29 @@ func refresh(id string) {
 	w.Dispatch(func() { w.Eval(js) })
 }
 
+func windowOpen() bool {
+	winMu.Lock()
+	defer winMu.Unlock()
+	return curWin != nil
+}
+
+// reopenLast — открыть окно последнего сбора (пункт «Последний: …» в трее).
+func reopenLast(cfg Config) {
+	callsMu.Lock()
+	id := lastCall
+	_, ok := calls[id]
+	callsMu.Unlock()
+	if ok {
+		openWindow(cfg, id)
+	}
+}
+
 func showReady(cfg Config, id string) {
 	beep()
+	openWindow(cfg, id)
+}
+
+func openWindow(cfg Config, id string) {
 	winMu.Lock()
 	if curWin != nil { // новый сбор вытесняет старое окно
 		// Только Destroy (WM_CLOSE → DestroyWindow → WM_DESTROY → выход из Run).
@@ -358,13 +519,17 @@ func runWindow(cfg Config, id string) {
 	defer runtime.UnlockOSThread()
 
 	st := snapshot(id)
+	height := 580
+	if len(st.Options) > 0 {
+		height = 740 // голосование занимает место
+	}
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		AutoFocus: true,
 		DataPath:  webviewDataPath(),
 		WindowOptions: webview2.WindowOptions{
 			Title:  "Сбор: " + st.Title,
 			Width:  440,
-			Height: 580,
+			Height: uint(height),
 			Center: true,
 		},
 	})
@@ -373,10 +538,11 @@ func runWindow(cfg Config, id string) {
 		return
 	}
 	defer w.Destroy()
-	w.SetSize(440, 580, webview2.HintFixed)
+	w.SetSize(440, height, webview2.HintFixed)
 
 	_ = w.Bind("getState", func() uiState { return snapshot(id) })
-	_ = w.Bind("answer", func(a, reason string) uiState { return answer(cfg, id, a, reason) })
+	_ = w.Bind("answer", func(a, reason, vote string) uiState { return answer(cfg, id, a, reason, vote) })
+	_ = w.Bind("pick", func(place string) uiState { return pick(cfg, id, place) })
 	_ = w.Bind("closeWindow", func() { w.Destroy() }) // см. showReady: не Terminate
 	w.SetHtml(readyHTML)
 

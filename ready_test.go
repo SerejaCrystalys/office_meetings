@@ -34,12 +34,12 @@ func TestAnswerAfterSeen(t *testing.T) {
 	clientID = "me"
 	st := newTestCall("t-answer")
 	addResponse(st, response{Call: st.ID, Client: "me", Name: "Я", Answer: ansSeen})
-	s := answer(Config{Name: "Я"}, st.ID, ansAccept, "")
+	s := answer(Config{Name: "Я"}, st.ID, ansAccept, "", "")
 	if s.Mine != ansAccept {
 		t.Fatalf("ждали Mine=accept, получили %q", s.Mine)
 	}
 	// второй раз ответить нельзя
-	s = answer(Config{Name: "Я"}, st.ID, ansDecline, "")
+	s = answer(Config{Name: "Я"}, st.ID, ansDecline, "", "")
 	if s.Mine != ansAccept {
 		t.Fatalf("ответ не должен меняться, получили %q", s.Mine)
 	}
@@ -72,12 +72,12 @@ func TestSnapshotGroups(t *testing.T) {
 func TestDeclineReason(t *testing.T) {
 	clientID = "me"
 	st := newTestCall("t-reason")
-	s := answer(Config{Name: "Я"}, st.ID, ansDecline, "  На созвоне  ")
+	s := answer(Config{Name: "Я"}, st.ID, ansDecline, "  На созвоне  ", "")
 	if len(s.People) != 1 || s.People[0].Reason != "На созвоне" {
 		t.Fatalf("ждали причину «На созвоне», получили %+v", s.People)
 	}
 	st2 := newTestCall("t-reason-acc")
-	s = answer(Config{Name: "Я"}, st2.ID, ansAccept, "лишний текст")
+	s = answer(Config{Name: "Я"}, st2.ID, ansAccept, "лишний текст", "")
 	if s.People[0].Reason != "" {
 		t.Fatalf("у «Принять» причины быть не должно, а есть %q", s.People[0].Reason)
 	}

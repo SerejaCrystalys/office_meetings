@@ -74,6 +74,7 @@ func setLast(text string) {
 	defer uiMu.Unlock()
 	if lastItem != nil {
 		lastItem.SetTitle(text)
+		lastItem.Enable() // клик открывает окно последнего сбора
 	}
 }
 
@@ -127,7 +128,7 @@ func main() {
 		uiMu.Lock()
 		statusItem = systray.AddMenuItem("⏳ Подключаюсь…", "")
 		statusItem.Disable()
-		lastItem = systray.AddMenuItem("Последний: пока тихо", "")
+		lastItem = systray.AddMenuItem("Последний: пока тихо", "Открыть окно последнего сбора")
 		lastItem.Disable()
 		uiMu.Unlock()
 		nameItem := systray.AddMenuItem("Ты: "+cfg.Name, "")
@@ -155,6 +156,10 @@ func main() {
 
 		systray.AddSeparator()
 		test := systray.AddMenuItem("Проверить окно сбора", "")
+		testPoll := systray.AddMenuItem("Проверить голосование за место", "")
+		if len(cfg.LunchPlaces) == 0 {
+			testPoll.Hide()
+		}
 		autostart := systray.AddMenuItemCheckbox("Запускать вместе с Windows", "", autostartEnabled())
 		openCfg := systray.AddMenuItem("Открыть настройки (config.json)", "")
 		reload := systray.AddMenuItem("Перезапустить (применить настройки)", "")
@@ -174,7 +179,11 @@ func main() {
 			for {
 				select {
 				case <-test.ClickedCh:
-					testCall(cfg)
+					testCall(cfg, false)
+				case <-testPoll.ClickedCh:
+					testCall(cfg, true)
+				case <-lastItem.ClickedCh:
+					reopenLast(cfg)
 				case <-autostart.ClickedCh:
 					on := !autostart.Checked()
 					if err := setAutostart(on); err != nil {

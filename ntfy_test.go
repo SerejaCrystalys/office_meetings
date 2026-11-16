@@ -83,16 +83,16 @@ func TestRevertAnswer(t *testing.T) {
 	clientID = "me"
 	st := newTestCall("t-revert")
 	addResponse(st, response{Call: st.ID, Client: "me", Name: "Я", Answer: ansSeen})
-	s := answer(Config{Name: "Я"}, st.ID, ansAccept, "") // Local — в сеть не уходит
+	s := answer(Config{Name: "Я"}, st.ID, ansAccept, "", "") // Local — в сеть не уходит
 	if s.Mine != ansAccept {
 		t.Fatalf("ждали accept, получили %q", s.Mine)
 	}
-	revertAnswer(st.ID, response{Call: st.ID, Client: "me", Name: "Я", Answer: ansAccept})
+	revertAnswer(st.ID, response{Call: st.ID, Client: "me", Name: "Я", Answer: ansAccept}, response{})
 	if s = snapshot(st.ID); s.Mine != "" || s.Waiting != 1 {
 		t.Fatalf("после отката ждали «молчит» и пустой Mine, получили Mine=%q waiting=%d", s.Mine, s.Waiting)
 	}
 	// можно ответить ещё раз
-	if s = answer(Config{Name: "Я"}, st.ID, ansDecline, ""); s.Mine != ansDecline {
+	if s = answer(Config{Name: "Я"}, st.ID, ansDecline, "", ""); s.Mine != ansDecline {
 		t.Fatalf("после отката ответ должен приниматься снова, получили %q", s.Mine)
 	}
 }

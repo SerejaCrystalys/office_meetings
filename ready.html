@@ -48,6 +48,33 @@
   .why .row button { padding: 11px 0; font-size: 14px; }
   .back { background: rgba(255,255,255,.1); flex: 0 0 34%; }
 
+  /* Голосование «куда идём» */
+  .poll { display: none; padding: 4px 24px 8px; }
+  .poll.on { display: block; }
+  .plbl { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #7d877f; margin-bottom: 6px; }
+  .win { display: none; margin-bottom: 8px; padding: 10px 12px; border-radius: 6px; text-align: center;
+    background: linear-gradient(#5a4a1c, #3b3112); color: #ffe7a3; font-size: 16px; }
+  .win.on { display: block; }
+  .win b { color: #fff; }
+  .win span { display: block; font-size: 12px; color: #d8c58c; margin-top: 2px; }
+  .opt {
+    position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 10px; margin-bottom: 5px;
+    border-radius: 6px; cursor: pointer; font-size: 14px; overflow: hidden;
+    background: linear-gradient(90deg, rgba(63,163,77,.28) var(--p), rgba(255,255,255,.05) var(--p));
+  }
+  .opt:hover:not(.closed) { filter: brightness(1.25); }
+  .opt.closed { cursor: default; }
+  .opt.mine { outline: 1px solid rgba(143,211,106,.7); }
+  .opt.won { outline: 2px solid #e2b93b; background: rgba(226,185,59,.18); }
+  .ocol { flex: 1; min-width: 0; }
+  .oname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ovoters { font-size: 11px; color: #a3aba2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ocnt { flex: none; min-width: 18px; text-align: right; font-weight: 700; color: #8fd36a; }
+  .pickb { flex: none; padding: 3px 7px; font-size: 13px; letter-spacing: 0; text-transform: none;
+    background: rgba(226,185,59,.25); box-shadow: none; border-radius: 4px; }
+  .other { display: flex; gap: 8px; }
+  .other button { flex: 0 0 30%; padding: 9px 0; font-size: 13px; }
+
   .you { text-align: center; font-size: 15px; min-height: 22px; padding: 0 24px 6px; }
   .sum { display: flex; justify-content: center; gap: 20px; font-size: 14px; padding-bottom: 10px; }
   ul { list-style: none; margin: 0; padding: 0 24px 18px; overflow: auto; flex: 1; }
@@ -84,12 +111,22 @@
       <button class="dec" id="send">✗ Отклонить</button>
     </div>
   </div>
+  <div class="poll" id="poll">
+    <div class="plbl" id="plbl"></div>
+    <div class="win" id="win"></div>
+    <div id="opts"></div>
+    <div class="other" id="other">
+      <input id="otherIn" maxlength="60" placeholder="Другое место…" autocomplete="off">
+      <button class="acc" id="otherBtn">Голос</button>
+    </div>
+  </div>
   <div class="you" id="you"></div>
   <div class="sum"><span class="ok" id="ca"></span><span class="wait" id="cw"></span><span class="no" id="cd"></span></div>
   <ul id="list"></ul>
 <script>
-  let S = null, skew = 0, expired = null, chipsKey = '', closeAt = null;
+  let S = null, skew = 0, expired = null, chipsKey = '', closeAt = null, closeKey = '';
   const CLOSE_DELAY = 5000; // окно закрывается само через 5 с после конца таймера или когда все ответили
+  const WIN_DELAY = 15000;  // после выбора места — чтобы успели прочитать
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -113,6 +150,48 @@
     }
     $('list').innerHTML = html || '<div class="empty">Пока никто не ответил</div>';
     $('cw').textContent = (expired ? '— Не ответили: ' : '⏳ Молчат: ') + S.waiting;
+  }
+
+  // Голосование «куда идём»: клик по месту — это и голос, и «Принять»; голос можно
+  // поменять до конца таймера. Инициатор (canPick) кнопкой 🏆 выбирает, куда идём.
+  const isPoll = () => !!(S && S.options && S.options.length);
+  const voteOpen = () => isPoll() && !S.winner && !expired && S.mine !== 'decline';
+
+  function renderPoll() {
+    $('poll').classList.toggle('on', isPoll());
+    if (!isPoll()) return;
+    const open = voteOpen();
+    $('plbl').textContent = S.winner ? 'Голосование'
+      : open ? (S.canPick ? 'Куда идём? Клик — голос, 🏆 — решить' : 'Куда идём? Клик по месту — голос и «Принять»')
+      : S.canPick ? 'Время вышло — выбери, куда идём 🏆'
+      : 'Голосование закрыто — ждём, что решит ' + (S.from || 'инициатор');
+    $('win').classList.toggle('on', !!S.winner);
+    $('win').innerHTML = S.winner ? '🏆 Идём: <b>' + esc(S.winner) + '</b>' +
+      (S.winnerBy ? '<span>решил(а) ' + esc(S.winnerBy) + '</span>' : '') : '';
+    const total = S.options.reduce((n, o) => n + o.voters.length, 0);
+    $('opts').innerHTML = S.options.map((o, i) => {
+      const p = total ? Math.round(o.voters.length / total * 100) : 0;
+      return `<div class="opt${o.mine ? ' mine' : ''}${S.winner === o.name ? ' won' : ''}${open ? '' : ' closed'}" data-i="${i}" style="--p:${p}%">` +
+        `<div class="ocol"><div class="oname" title="${esc(o.name)}">${o.custom ? '✎ ' : ''}${esc(o.name)}</div>` +
+        (o.voters.length ? `<div class="ovoters" title="${esc(o.voters.join(', '))}">${esc(o.voters.join(', '))}</div>` : '') +
+        `</div><span class="ocnt">${o.voters.length || ''}</span>` +
+        (S.canPick && S.winner !== o.name ? `<button class="pickb" title="Идём сюда">🏆</button>` : '') + '</div>';
+    }).join('');
+    $('opts').querySelectorAll('.opt').forEach(el => el.onclick = e => {
+      const o = S.options[+el.dataset.i];
+      if (e.target.classList.contains('pickb')) pick(o.name).then(render);
+      else if (voteOpen() && !o.mine) vote(o.name);
+    });
+    $('other').style.display = open ? '' : 'none';
+  }
+  function vote(name) {
+    name = name.trim();
+    if (name) answer('accept', '', name).then(render);
+  }
+  function voteOther() {
+    const v = $('otherIn').value;
+    $('otherIn').value = '';
+    vote(v);
   }
 
   // Подсказки причины — кнопки; клик подставляет текст в поле (повторный клик — очищает).
@@ -148,24 +227,33 @@
     $('cd').textContent = '✗ Отказались: ' + s.declined;
     renderChips();
     renderList();
+    renderPoll();
     tick();
   }
 
   function tick() {
     if (!S) return;
     const now = Date.now() + skew, total = S.deadlineMs - S.startMs, left = Math.max(0, S.deadlineMs - now);
-    if ((left <= 0) !== expired) { expired = left <= 0; renderList(); }
+    if ((left <= 0) !== expired) { expired = left <= 0; renderList(); renderPoll(); }
     $('bar').style.width = (total > 0 ? left / total * 100 : 0) + '%';
 
     // Автозакрытие: таймер вышел, или ты ответил и молчащих не осталось. Если кто-то
     // новый появится в «молчат» до закрытия — отсчёт сбрасывается.
-    const allAnswered = !!S.mine && S.waiting === 0;
-    if (left <= 0 || allAnswered) { if (closeAt === null) closeAt = now + CLOSE_DELAY; }
-    else closeAt = null;
+    // С голосованием: у инициатора окно ждёт его выбора; после выбора места закрывается
+    // у всех через WIN_DELAY (у кого окно уже закрылось — оно откроется с итогом).
     if (closeAt === Infinity) return; // закрытие уже запрошено
+    const allAnswered = !!S.mine && S.waiting === 0, poll = isPoll();
+    let want, key;
+    if (poll && S.winner) { want = true; key = 'w:' + S.winner; }
+    else if (poll && S.canPick) { want = false; key = 'pick'; }
+    else { want = left <= 0 || allAnswered; key = 'n'; }
+    if (key !== closeKey) { closeKey = key; closeAt = null; }
+    if (!want) closeAt = null;
+    else if (closeAt === null) closeAt = now + (key === 'n' ? CLOSE_DELAY : WIN_DELAY);
     if (closeAt !== null && now >= closeAt) { closeAt = Infinity; $('left').textContent = 'Закрываю…'; closeWindow(); return; }
     const closing = closeAt !== null ? ' · закроется через ' + Math.max(1, Math.ceil((closeAt - now) / 1000)) + ' с' : '';
-    $('left').textContent = (left > 0 ? (allAnswered ? 'Все ответили' : 'Осталось ' + Math.ceil(left / 1000) + ' с')
+    $('left').textContent = (poll && S.winner ? 'Место выбрано'
+      : left > 0 ? (allAnswered ? 'Все ответили' : 'Осталось ' + Math.ceil(left / 1000) + ' с')
       : 'Время вышло') + closing;
     const done = !!S.mine || left <= 0;
     $('a').disabled = done; $('d').disabled = done; $('send').disabled = done;
@@ -178,11 +266,13 @@
   function sendDecline() {
     const reason = $('reason').value.trim();
     openWhy(false);
-    answer('decline', reason).then(render);
+    answer('decline', reason, '').then(render);
   }
 
   setInterval(tick, 250);
-  $('a').onclick = () => answer('accept', '').then(render);
+  $('a').onclick = () => answer('accept', '', '').then(render);
+  $('otherBtn').onclick = voteOther;
+  $('otherIn').addEventListener('keydown', e => { if (e.key === 'Enter') voteOther(); });
   $('d').onclick = () => openWhy(true);
   $('back').onclick = () => openWhy(false);
   $('send').onclick = sendDecline;
