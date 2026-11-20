@@ -19,6 +19,16 @@ var (
 	procSetFgWindow  = user32.NewProc("SetForegroundWindow")
 	procCreateMutex  = kernel32.NewProc("CreateMutexW")
 	procCloseHandle  = kernel32.NewProc("CloseHandle")
+
+	procGetFgWindow     = user32.NewProc("GetForegroundWindow")
+	procGetWindowThread = user32.NewProc("GetWindowThreadProcessId")
+	procAttachThread    = user32.NewProc("AttachThreadInput")
+	procBringToTop      = user32.NewProc("BringWindowToTop")
+	procShowWindow      = user32.NewProc("ShowWindow")
+	procIsIconic        = user32.NewProc("IsIconic")
+	procFlashWindowEx   = user32.NewProc("FlashWindowEx")
+	procCurThreadID     = kernel32.NewProc("GetCurrentThreadId")
+	procKeybdEvent      = user32.NewProc("keybd_event")
 )
 
 const (
@@ -45,12 +55,78 @@ func notify(title, text string) {
 	go messageBox(title, text, mbOK|mbIconInfo|mbTopmost|mbSetForeground)
 }
 
-// Окно поверх всех и на передний план.
+const (
+	hwndTopmost    = ^uintptr(0) // -1
+	swpNoSize      = 0x1
+	swpNoMove      = 0x2
+	swpNoActivate  = 0x10
+	swpShowWindow  = 0x40
+	swRestore      = 9
+	flashwStop     = 0
+	flashwAll      = 0x3 // заголовок + кнопка на панели задач
+	flashwTimer    = 0x4 // мигать, пока не остановим
+	flashFastBlink = 250 // мс — быстрее обычного мигания Windows
+	vkMenu         = 0x12
+	keyeventfKeyUp = 0x2
+)
+
+// bringToFront — окно поверх всех и на передний план. Вызывать из потока окна.
+// Windows не даёт фоновой программе забрать фокус (SetForegroundWindow молча
+// не срабатывает), поэтому на время вызова подключаемся к потоку активного окна.
 func bringToFront(hwnd uintptr) {
-	const hwndTopmost = ^uintptr(0) // -1
-	const swpNoSize, swpNoMove, swpShowWindow = 0x1, 0x2, 0x40
+	if r, _, _ := procIsIconic.Call(hwnd); r != 0 {
+		procShowWindow.Call(hwnd, swRestore)
+	}
 	procSetWindowPos.Call(hwnd, hwndTopmost, 0, 0, 0, 0, swpNoSize|swpNoMove|swpShowWindow)
+	fg, _, _ := procGetFgWindow.Call()
+	if fg == hwnd {
+		return
+	}
+	cur, _, _ := procCurThreadID.Call()
+	fgThread, _, _ := procGetWindowThread.Call(fg, 0)
+	if fg != 0 && fgThread != 0 && fgThread != cur {
+		procAttachThread.Call(cur, fgThread, 1)
+		defer procAttachThread.Call(cur, fgThread, 0)
+	}
+	procBringToTop.Call(hwnd)
 	procSetFgWindow.Call(hwnd)
+	if isForeground(hwnd) {
+		return
+	}
+	// Запасной приём: Windows снимает блокировку фокуса после нажатия клавиши.
+	// Alt «нажимаем» до вывода вперёд и «отпускаем» после — отпускание приходит уже
+	// в наше окно, так что меню в чужой программе не открывается.
+	procKeybdEvent.Call(vkMenu, 0, 0, 0)
+	procSetFgWindow.Call(hwnd)
+	procKeybdEvent.Call(vkMenu, 0, keyeventfKeyUp, 0)
+}
+
+// keepTopmost — напомнить, что окно поверх всех (другие «поверх всех» могли его перекрыть).
+// Фокус не трогает.
+func keepTopmost(hwnd uintptr) {
+	procSetWindowPos.Call(hwnd, hwndTopmost, 0, 0, 0, 0, swpNoSize|swpNoMove|swpNoActivate)
+}
+
+// isForeground — окно сейчас активное.
+func isForeground(hwnd uintptr) bool {
+	fg, _, _ := procGetFgWindow.Call()
+	return fg == hwnd
+}
+
+// flash — мигать кнопкой на панели задач и заголовком (часто, без остановки) или перестать.
+func flash(hwnd uintptr, on bool) {
+	fi := struct {
+		size    uint32
+		hwnd    uintptr
+		flags   uint32
+		count   uint32
+		timeout uint32
+	}{hwnd: hwnd, flags: flashwStop}
+	fi.size = uint32(unsafe.Sizeof(fi))
+	if on {
+		fi.flags, fi.timeout = flashwAll|flashwTimer, flashFastBlink
+	}
+	procFlashWindowEx.Call(uintptr(unsafe.Pointer(&fi)))
 }
 
 func tryMutex() bool {

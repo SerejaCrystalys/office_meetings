@@ -631,6 +631,50 @@ func openWindow(cfg Config, id string) {
 	go runWindow(cfg, id)
 }
 
+// attention — чтобы окно точно заметили: пока не ответил и таймер идёт, часто мигает
+// кнопка на панели задач и заголовок; окно ещё раз выводится вперёд, когда уже
+// показано, и раз в 3 с напоминает Windows, что оно поверх всех. Всё — в потоке окна.
+func attention(w webview2.WebView, hwnd uintptr, id string, done <-chan struct{}) {
+	ui := func(f func()) {
+		select {
+		case <-done: // окно уже закрыто
+		default:
+			w.Dispatch(f)
+		}
+	}
+	waiting := func() bool {
+		s := snapshot(id)
+		return s.Mine == "" && time.Now().UnixMilli() < s.DeadlineMs
+	}
+	flashing := waiting()
+	if flashing {
+		ui(func() { flash(hwnd, true) })
+	}
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for i := 1; ; i++ {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+		if i == 1 || i == 4 { // первая попытка была до показа окна — повторяем
+			ui(func() {
+				if !isForeground(hwnd) {
+					bringToFront(hwnd)
+				}
+			})
+		}
+		if flashing && !waiting() {
+			flashing = false
+			ui(func() { flash(hwnd, false) })
+		}
+		if i%6 == 0 {
+			ui(func() { keepTopmost(hwnd) })
+		}
+	}
+}
+
 func webviewDataPath() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
@@ -675,8 +719,12 @@ func runWindow(cfg Config, id string) {
 	curWin, curCall = w, id
 	winMu.Unlock()
 
-	bringToFront(uintptr(w.Window()))
+	hwnd := uintptr(w.Window())
+	bringToFront(hwnd)
+	done := make(chan struct{})
+	go attention(w, hwnd, id, done)
 	w.Run()
+	close(done)
 
 	winMu.Lock()
 	if curWin == w {
